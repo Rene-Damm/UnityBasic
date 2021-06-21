@@ -61,7 +61,7 @@ EnumerationBinary DefinitionFlags
 EndEnumeration
 
 Structure Definition
-  Name.s
+  Name.i
   Scope.i
   Type.i
   Flags.i
@@ -74,6 +74,11 @@ Structure Scope
 EndStructure
 
 Structure Code
+  IdentifierCount.i
+  ScopeCount.i
+  DefinitionCount.i
+  Map IdentifierTable.i()
+  Array Identifiers.s( 1 )
   Array Scopes.Scope( 1 ) ; First one is always the global scope
   Array Definitions.Definition( 1 )
 EndStructure
@@ -87,6 +92,9 @@ Global Code.Code
 Structure Parser
   *Position
   *EndPosition
+  NameBuffer.s
+  NameBufferSize.i
+  ;store failure state here; func to reset
 EndStructure
 
 Procedure.c ToLower( Character.c )
@@ -105,7 +113,7 @@ Procedure.i IsWhitespace( Character.c )
   ProcedureReturn #False
 EndProcedure
 
-Procedure.i IsAlphanumeric( Character.c )
+Procedure.i IsAlpha( Character.c )
   ;;;;FIXME: Not Unicode...
   If Character >= 65 And Character <= 90
     ProcedureReturn #True
@@ -113,10 +121,15 @@ Procedure.i IsAlphanumeric( Character.c )
   If Character >= 97 And Character <= 122
     ProcedureReturn #True
   EndIf
+  ProcedureReturn #False
+EndProcedure
+
+Procedure.i IsAlphanumeric( Character.c )
+  ;;;;FIXME: Not Unicode...
   If Character >= 48 And Character <= 57
     ProcedureReturn #True
   EndIf
-  ProcedureReturn #False
+  ProcedureReturn IsAlpha( Character )
 EndProcedure
 
 Procedure SkipWhitespace( *Parser.Parser )
@@ -129,7 +142,7 @@ Procedure SkipWhitespace( *Parser.Parser )
   Wend
 EndProcedure
 
-Procedure.i MatchToken( *Parser.Parser, Token.s, Length.i )
+Procedure.i MatchToken( *Parser.Parser, Token.s, Length.i, AnyFollowing = #False )
   If *Parser\EndPosition - *Parser\Position < Length
     ProcedureReturn #False
   EndIf
@@ -141,7 +154,7 @@ Procedure.i MatchToken( *Parser.Parser, Token.s, Length.i )
       ProcedureReturn #False
     EndIf
   Next
-  If *Parser\Position + Index < *Parser\EndPosition
+  If Not AnyFollowing And *Parser\Position + Index < *Parser\EndPosition
     Define.c NextChar = PeekB( *Parser\Position + Index )
     If IsAlphanumeric( NextChar )
       ProcedureReturn #False
@@ -160,12 +173,123 @@ Procedure.i ParseModifier( *Parser.Parser )
   ProcedureReturn 0
 EndProcedure
 
-Procedure.i ParseDefinition( *Parser.Parser )
-  ProcedureReturn #False
+Procedure.i ParseIdentifier( *Parser.Parser )
+  SkipWhitespace( *Parser )
+  
+  ;;;;TODO: escaped identifiers
+  ;;;;TODO: identifiers ending in !
+  
+  Define *StartPosition = *Parser\Position
+  While *Parser\Position < *Parser\EndPosition
+    Define.c Char = PeekB( *Parser\Position )
+    If ( *StartPosition = *Parser\Position And Not IsAlpha( Char ) ) Or Not IsAlphanumeric( Char )
+      Break
+    EndIf
+    *Parser\Position + 1
+  Wend
+  
+  If *Parser\Position = *StartPosition
+    ProcedureReturn -1
+  EndIf
+  
+  Define.i Length = *Parser\Position - *StartPosition
+  If *Parser\NameBufferSize < ( Length - 1 )
+    *Parser\NameBufferSize = Length + 64
+    *Parser\NameBuffer = Space( *Parser\NameBufferSize )
+  EndIf
+  
+  Define.i Index
+  Define *Buffer = @*Parser\NameBuffer
+  For Index = 0 To Length - 1
+    Define.c Char = ToLower( PeekB( *StartPosition + Index ) )
+    PokeC( *Buffer + Index * SizeOf( Character ), Char )
+  Next
+  PokeC( *Buffer + Index * SizeOf( Character ), #NUL )
+  
+  Define *Element = FindMapElement( Code\IdentifierTable(), *Parser\NameBuffer )
+  If *Element = #Null
+    Define.s Name = Left( *Parser\NameBuffer, Length )
+    If ArraySize( Code\Identifiers() ) = Code\IdentifierCount
+      ReDim Code\Identifiers.s( Code\IdentifierCount + 512 )
+    EndIf
+    Define.i IdIndex = Code\IdentifierCount
+    Code\Identifiers( IdIndex ) = Name
+    Code\IdentifierCount + 1
+    *Element = AddMapElement( Code\IdentifierTable(), *Parser\NameBuffer )
+    PokeI( *Element, IdIndex )
+  EndIf
+  
+  ProcedureReturn PeekI( *Element )
+  
 EndProcedure
 
-Procedure.i ParseText()
-  ProcedureReturn #False
+; Returns index of definition or -1 on failure.
+Procedure.i ParseDefinition( *Parser.Parser )
+  
+  ; Parse modifiers.
+  Define.i Flags = 0
+  
+  ; Parse type.
+  Define.i Type = 0
+  SkipWhitespace( *Parser )
+  If MatchToken( *Parser, "type", 4 )
+    Type = #TypeDefinition
+  Else
+    ;;;;TODO
+    ProcedureReturn -1
+  EndIf
+  
+  ; Parse name.
+  Define.i Name = ParseIdentifier( *Parser )
+  If Name = -1
+    ;;;;TODO
+    ProcedureReturn -1
+  EndIf
+  
+  ; Add definition.
+  If ArraySize( Code\Definitions() ) = Code\DefinitionCount
+    ReDim Code\Definitions.Definition( Code\DefinitionCount + 256 )
+  EndIf
+  Define.i DefinitionIndex = Code\DefinitionCount
+  Code\Definitions( DefinitionIndex )\Flags = Flags
+  Code\Definitions( DefinitionIndex )\Name = Name
+  Code\Definitions( DefinitionIndex )\Type = Type
+  Code\DefinitionCount + 1
+  
+  ; Parse parameters.
+  
+  ; Parse clauses.
+  
+  ; Parse body.
+  SkipWhitespace( *Parser )
+  If MatchToken( *Parser, ";", 1, #True )
+  ElseIf MatchToken( *Parser, "{", 1, #True )
+    ;;;;TODO
+  Else
+    ProcedureReturn -1
+  EndIf  
+  
+  ProcedureReturn DefinitionIndex
+  
+EndProcedure
+
+Procedure ParseText()
+  
+  ResetStructure( @Code, Code )
+  
+  Define.Parser Parser
+  Parser\Position = *Text
+  Parser\EndPosition = *Text + TextLength
+  
+  While Parser\Position < Parser\EndPosition
+    If ParseDefinition( @Parser ) = -1
+      ;;;;TODO: error handling (diagnose and keep going)
+      Break
+    EndIf
+  Wend
+  
+  Debug( "Definitions: " + Str( Code\DefinitionCount ) )
+  
 EndProcedure
 
 Prototype.i ParseFunction( *Parser.Parser )
@@ -181,8 +305,32 @@ Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
 EndProcedure
 
 ProcedureUnit CanParseModifier()
+  ResetStructure( @Code, Code )
   TestParseText( @ParseModifier(), "abstract", #IsAbstract )
   TestParseText( @ParseModifier(), "ABSTRACT", #IsAbstract )
+EndProcedureUnit
+
+ProcedureUnit CanParseIdentifier()
+  ResetStructure( @Code, Code )
+  TestParseText( @ParseIdentifier(), "Foobar", 0 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( FindMapElement( Code\IdentifierTable(), "foobar" ) <> #Null )
+  Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foobar" ) ) = 0 )
+  TestParseText( @ParseIdentifier(), "FOOBAR", 0 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( FindMapElement( Code\IdentifierTable(), "foobar" ) <> #Null )
+  Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foobar" ) ) = 0 )
+EndProcedureUnit
+
+ProcedureUnit CanParseSimpleTypeDefinition()
+  ResetStructure( @Code, Code )
+  TestParseText( @ParseDefinition(), "type First;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\Type = #TypeDefinition )
+  Assert( Code\Definitions( 0 )\Flags = 0 )
 EndProcedureUnit
 
 ;==============================================================================
@@ -211,6 +359,8 @@ EndProcedure
 ;==============================================================================
 ; Main loop.
 
+ParseText()
+
 Repeat
   
   Define Event = WaitWindowEvent()
@@ -228,10 +378,10 @@ FlushText()
 
 ;[X] Full-screen text view
 ;[X] Text is saved and loaded
-;[ ] Type definition is parsed
+;[X] Type definition is parsed
 
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 184
-; FirstLine = 137
-; Folding = --
+; CursorPosition = 380
+; FirstLine = 326
+; Folding = ---
 ; EnableXP

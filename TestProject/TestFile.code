@@ -1,2 +1,6 @@
 
 TYPE FirstType;
+
+TYPE OtherType;
+
+TYPE Next;
