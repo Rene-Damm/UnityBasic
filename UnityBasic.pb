@@ -1,8 +1,10 @@
 
 EnableExplicit
 
-Define.s ProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
-Define.s TextFilePath = ProjectPath + "\TestFile.code"
+Define.s UnityExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
+Define.s GeneratedPathProject = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
+Define.s SourceProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
+Define.s TextFilePath = SourceProjectPath + "\TestFile.code"
 
 #SPACE = 32
 #NEWLINE = 10
@@ -13,7 +15,14 @@ Define.s TextFilePath = ProjectPath + "\TestFile.code"
 ; Initialize.
 
 InitScintilla()
+InitNetwork()
 ExamineDesktops()
+
+Define.i Server = CreateNetworkServer( #PB_Any, 10978 )
+If Server = 0
+  Debug( "Cannot create server!!" )
+  ;;;;TODO: handle error
+EndIf
 
 Define.i WindowWidth = DesktopWidth( 0 )
 Define.i WindowHeight = DesktopHeight( 0 )
@@ -22,8 +31,10 @@ Define Window.i = OpenWindow( #PB_Any, 0, 0, WindowWidth, WindowHeight, "Unity B
 Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, WindowWidth, WindowHeight, 0 )
 
 #WINDOW_SAVE_TIMER = 0
+#WINDOW_NETWORK_TIMER = 1
 
 AddWindowTimer( Window, #WINDOW_SAVE_TIMER, 2000 )
+AddWindowTimer( Window, #WINDOW_NETWORK_TIMER, 500 )
 
 Global.i TextFile
 Global.i TextLength = FileSize( TextFilePath )
@@ -41,6 +52,8 @@ ScintillaSendMessage( Scintilla, #SCI_SETTEXT, 0, *Text )
 ScintillaSendMessage( Scintilla, #SCI_SETREADONLY, 0 )
 
 SetActiveGadget( Scintilla )
+
+Global.i Unity = RunProgram( UnityExecutablePath, ~"-batchmode -projectPath \"" + GeneratedPathProject + ~"\" -executeMethod EditorTooling.ConnectClient", "", #PB_Program_Open | #PB_Program_Read )
 
 ;==============================================================================
 
@@ -366,22 +379,50 @@ Repeat
   Define Event = WaitWindowEvent()
   
   If Event = #PB_Event_Timer
-    If EventTimer() = #WINDOW_SAVE_TIMER
-      FlushText()
-    EndIf
-  ElseIf Event = #PB_Event_Gadget
+    Select EventTimer()
+        Case #WINDOW_SAVE_TIMER
+          FlushText()
+          
+        Case #WINDOW_NETWORK_TIMER
+          Select NetworkServerEvent( Server )
+            Case #PB_NetworkEvent_Connect
+              Debug "Unity connected"
+              
+            Case #PB_NetworkEvent_Disconnect
+              Debug "Unity disconnected"
+              
+            Case #PB_NetworkEvent_Data
+              Debug "Data"
+          EndSelect
+      EndSelect
   EndIf
   
 Until Event = #PB_Event_CloseWindow
 
 FlushText()
+If Unity <> 0
+  KillProgram( Unity ) ;;;;TODO: shut down Unity more elegantly...
+  CloseProgram( Unity )
+EndIf
 
 ;[X] Full-screen text view
 ;[X] Text is saved and loaded
 ;[X] Type definition is parsed
+;[X] Unity is launched in background
+;[X] Unity connects over network
+;[ ] Unity player is built
+;[ ] Unity player is executed and window embedded
+;[ ] Output code is generated
+
+
+; What I want
+; - All tests are being run continuously on all connected players (smart execution to narrow down run sets)
+; - Everything is saved automatically
+; - Changes are picked up automatically and reload the application automatically to a known state and from there, continue with the changes applied
+; - The toolchain is configured entirely from within annotations in the code
 
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 380
-; FirstLine = 326
+; CursorPosition = 411
+; FirstLine = 367
 ; Folding = ---
 ; EnableXP
