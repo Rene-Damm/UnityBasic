@@ -3,7 +3,8 @@ EnableExplicit
 
 Define.s UnityEditorExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
 Define.s UnityPlayerExecutablePath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject\Builds\UnityBasic64.exe"
-Define.s GeneratedPathProject = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
+Define.s GeneratedProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
+Define.s GeneratedDocsPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Docs"
 Define.s SourceProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
 Define.s TextFilePath = SourceProjectPath + "\TestFile.code"
 
@@ -30,7 +31,7 @@ Define.i WindowHeight = DesktopUnscaledY( DesktopHeight( 0 ) )
 
 Define Window.i = OpenWindow( #PB_Any, 0, 0, WindowWidth, WindowHeight, "Unity Basic", #PB_Window_BorderLess | #PB_Window_ScreenCentered )
 Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, WindowWidth / 2, WindowHeight, 0 )
-Define.i DocViewer = WebGadget( #PB_Any, WindowWidth / 2, 0, WindowWidth / 2, WindowHeight / 2, "https://unity3d.com" )
+Define.i DocViewer = WebGadget( #PB_Any, WindowWidth / 2, 0, WindowWidth / 2, WindowHeight / 2, "file:///" + ReplaceString( GeneratedDocsPath, "\", "/" ) + "/index.html" )
 Define.i PlayerContainer = ContainerGadget( #PB_Any, WindowWidth / 2, WindowHeight / 2, WindowWidth / 2 , WindowHeight / 2 )
 ;Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, 0, 0, 0 )
 ;Define.i DocViewer = WebGadget( #PB_Any, 0, 0, 0, 0, "https://unity3d.com" )
@@ -67,7 +68,7 @@ Enumeration ClientStatus
   #WaitingForClientIdle
 EndEnumeration
 
-Global.i UnityEditor = RunProgram( UnityEditorExecutablePath, ~"-batchmode -projectPath \"" + GeneratedPathProject + ~"\" -executeMethod EditorTooling.Run", "", #PB_Program_Open | #PB_Program_Read )
+Global.i UnityEditor = RunProgram( UnityEditorExecutablePath, ~"-batchmode -projectPath \"" + GeneratedProjectPath + ~"\" -executeMethod EditorTooling.Run", "", #PB_Program_Open | #PB_Program_Read )
 Global.i UnityPlayer
 Global.i UnityClient
 Global.i UnityClientStatus = #WaitingForClientToConnect
@@ -486,7 +487,12 @@ EndIf
 ;[X] Unity player window is embedded into IDE window
 ;[ ] Output code is generated
 ;[ ] Output code is being run
+;[ ] Can add&render display element (sprite or model)
+;[ ] Can animate display element in code
 
+; ....
+
+;[ ] 
 
 ; What I want
 ; - All tests are being run continuously on all connected players (smart execution to narrow down run sets)
@@ -495,7 +501,7 @@ EndIf
 ; - The toolchain is configured entirely from within annotations in the code
 
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 485
+; CursorPosition = 490
 ; FirstLine = 441
 ; Folding = ---
 ; EnableXP
