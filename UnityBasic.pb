@@ -29,15 +29,26 @@ EndIf
 Define.i WindowWidth = DesktopUnscaledX( DesktopWidth( 0 ) )
 Define.i WindowHeight = DesktopUnscaledY( DesktopHeight( 0 ) )
 
-Define Window.i = OpenWindow( #PB_Any, 0, 0, WindowWidth, WindowHeight, "Unity Basic", #PB_Window_BorderLess | #PB_Window_ScreenCentered )
-Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, WindowWidth / 2, WindowHeight, 0 )
-Define.i DocViewer = WebGadget( #PB_Any, WindowWidth / 2, 0, WindowWidth / 2, WindowHeight / 2, "file:///" + ReplaceString( GeneratedDocsPath, "\", "/" ) + "/index.html" )
-Define.i PlayerContainer = ContainerGadget( #PB_Any, WindowWidth / 2, WindowHeight / 2, WindowWidth / 2 , WindowHeight / 2 )
+Define.i Window = OpenWindow( #PB_Any, 0, 0, WindowWidth, WindowHeight, "Unity Basic", #PB_Window_BorderLess | #PB_Window_ScreenCentered )
+
+SetWindowTitle( Window, "UnityBasic" )
+Global.i StatusBar = CreateStatusBar( #PB_Any, WindowID( Window ) )
+AddStatusBarField( WindowWidth * 0.05 )
+AddStatusBarField( WindowWidth * 0.70 )
+AddStatusBarField( WindowWidth * 0.25 )
+
+Define.i ContentWidth = WindowWidth
+Define.i ContentHeight = WindowHeight - StatusBarHeight( StatusBar )
+
+Global.i Scintilla = ScintillaGadget( #PB_Any, 0, 0, ContentWidth / 2, ContentHeight, 0 )
+Define.i DocViewer = WebGadget( #PB_Any, ContentWidth / 2, 0, ContentWidth / 2, ContentHeight / 2, "file:///" + ReplaceString( GeneratedDocsPath, "\", "/" ) + "/index.html" )
+Define.i PlayerContainer = ContainerGadget( #PB_Any, ContentWidth / 2, ContentHeight / 2, ContentWidth / 2 , ContentHeight / 2 )
 ;Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, 0, 0, 0 )
 ;Define.i DocViewer = WebGadget( #PB_Any, 0, 0, 0, 0, "https://unity3d.com" )
 ;Define.i PlayerContainer = ContainerGadget( #PB_Any, 0, 0, 0, 0 )
 ;Define.i HorizontalSplitter = SplitterGadget( #PB_Any, 0, 0, 0, 0, DocViewer, PlayerContainer )
 ;Define.i VerticalSplitter = SplitterGadget( #PB_Any, 0, 0, WindowWidth, WindowHeight, Scintilla, HorizontalSplitter, #PB_Splitter_Vertical )
+
 
 #WINDOW_SAVE_TIMER = 0
 #WINDOW_NETWORK_TIMER = 1
@@ -76,12 +87,91 @@ Global *UnityClientNetworkBuffer = AllocateMemory( 65536 ) ; Max length of TCP m
 
 ;==============================================================================
 
+Structure TextRegion
+  LeftPos.i
+  RightPos.i
+EndStructure
+
+Enumeration AnnotationKind
+  #DescriptionAnnotation
+  #AssetAnnotation
+EndEnumeration
+
+; Annotations are free-form text blobs that can be attached to definitions.
+; They are used as instructions for the tooling.
+Structure Annotation
+  AnnotationKind.i
+  AnnotationText.s
+  NextAnnotation.i
+EndStructure
+
+Enumeration ClauseKind
+  #PreconditionClause
+  #PostconditionClause
+EndEnumeration
+
+; Clauses are optional forms that can be tagged onto definitions.
+; They are used for things such as pre- and postconditions.
+Structure Clause
+  NextClause.i
+EndStructure
+
+CompilerIf #False
+Enumeration TypeKind
+  #NamedType  
+  #PrimitiveType
+  #DerivedType
+  #UnionType
+  #IntersectionType
+  #InstancedType
+  #TupleType
+EndEnumeration
+CompilerEndIf
+
+Enumeration Operator
+  #LiteralExpression
+  #LogicalAndExpression
+  #LogicalOrExpression
+  #LogicalNotExpression
+  #BitwiseAndExpression
+  #BitwiseOrExpression
+  #CallExpression
+  #TupleExpression
+EndEnumeration
+
+; Type and value expressions use the same data format.
+Structure Expression
+  Operator.i
+  Type.i
+  Region.TextRegion
+  FirstOperand.i
+  SecondOperand.i
+EndStructure
+
+Enumeration StatementKind
+  #ExpressionStatement
+  #ReturnStatement
+  #YieldStatement
+  #LoopStatement
+  #BreakStatement
+  #ContinueStatement
+  #IfStatement
+  #SwitchStatement
+EndEnumeration
+
+Structure Statement
+  StatementKind.i
+  NextStatement.i
+EndStructure
+
 Enumeration DefinitionType
   #TypeDefinition
   #MethodDefinition
   #FieldDefinition
   #ModuleDefinition
   #LibraryDefinition
+  #FeatureDefinition
+  #ProgramDefinition
 EndEnumeration
 
 EnumerationBinary DefinitionFlags
@@ -90,6 +180,10 @@ EnumerationBinary DefinitionFlags
   #IsBefore
   #IsAfter
   #IsAround
+  #IsImmutable
+  #IsMutable
+  #IsSingleton ; 'object' in code
+  #IsExtend
 EndEnumeration
 
 Structure Definition
@@ -97,25 +191,57 @@ Structure Definition
   Scope.i
   Type.i
   Flags.i
+  InnerScope.i
+  Region.TextRegion
+  NextDefinitionInScope.i
+  FirstAnnotation.i ; -1 if none.
+  FirstClause.i ; -1 if none.
 EndStructure
 
 Structure Scope
   Parent.i ; -1 is global scope.
   Definition.i ; -1 is global scope.
-  Map Definitions.i()
+  FirstDefinition.i
 EndStructure
 
+Structure Diagnostic
+EndStructure
+
+; Just a bunch of arrays that contain a completely flattened representation of source code.
+; No explicit tree structure.
 Structure Code
   IdentifierCount.i
   ScopeCount.i
   DefinitionCount.i
+  StatementCount.i
+  ExpressionCount.i
+  AnnotationCount.i
+  ClauseCount.i
+  DiagnosticCount.i
+  ErrorCount.i
+  WarningCount.i
   Map IdentifierTable.i()
-  Array Identifiers.s( 1 )
+  Array Identifiers.s( 0 )
   Array Scopes.Scope( 1 ) ; First one is always the global scope
-  Array Definitions.Definition( 1 )
+  Array Definitions.Definition( 0 )
+  Array Statements.Statement( 0 )
+  Array Expressions.Expression( 0 )
+  Array Annotations.Annotation( 0 )
+  Array Clauses.Clause( 0 )
+  Array Diagnostics.Diagnostic( 0 )
 EndStructure
 
 Global Code.Code
+
+Procedure ResetCode()
+  If Scintilla <> 0
+    ScintillaSendMessage( Scintilla, #SCI_ANNOTATIONCLEARALL )
+  EndIf
+  ResetStructure( @Code, Code )
+  Code\ScopeCount = 1
+  Code\Scopes( 1 )\Parent = -1
+  Code\Scopes( 1 )\Definition = -1
+EndProcedure
 
 ;==============================================================================
 ; Parser.
@@ -126,8 +252,21 @@ Structure Parser
   *EndPosition
   NameBuffer.s
   NameBufferSize.i
+  CurrentScope.i
+  CurrentDefinitionInScope.i
   ;store failure state here; func to reset
 EndStructure
+
+Macro PushScope( Parser )
+  Define.i PreviousScope = Parser\CurrentScope
+  Define.i PreviousDefinitionInScope = Parser\CurrentDefinitionInScope
+  ;;TODO
+EndMacro
+
+Macro PopScope( Parser )
+  Parser\CurrentScope = PreviousScope
+  Parser\CurrentDefinitionInScope = PreviousDefinionInScope
+EndMacro
 
 Procedure.c ToLower( Character.c )
   ;;;;FIXME: Not Unicode...
@@ -135,6 +274,14 @@ Procedure.c ToLower( Character.c )
     ProcedureReturn 97 + ( Character - 65 )
   EndIf
   ProcedureReturn Character
+EndProcedure
+
+Procedure.b IsUpper( Character.c )
+  ;;;;FIXME: Not Unicode...
+  If Character >= 65 And Character <= 90
+    ProcedureReturn #True
+  EndIf
+  ProcedureReturn #False
 EndProcedure
 
 Procedure.i IsWhitespace( Character.c )
@@ -214,7 +361,7 @@ Procedure.i ParseIdentifier( *Parser.Parser )
   Define *StartPosition = *Parser\Position
   While *Parser\Position < *Parser\EndPosition
     Define.c Char = PeekB( *Parser\Position )
-    If ( *StartPosition = *Parser\Position And Not IsAlpha( Char ) ) Or Not IsAlphanumeric( Char )
+    If ( *StartPosition = *Parser\Position And Not IsAlpha( Char ) And Char <> '_' ) Or ( Not IsAlphanumeric( Char ) And Char <> '_' )
       Break
     EndIf
     *Parser\Position + 1
@@ -225,22 +372,48 @@ Procedure.i ParseIdentifier( *Parser.Parser )
   EndIf
   
   Define.i Length = *Parser\Position - *StartPosition
-  If *Parser\NameBufferSize < ( Length - 1 )
-    *Parser\NameBufferSize = Length + 64
+  If *Parser\NameBufferSize < Length * 2
+    *Parser\NameBufferSize = Length * 2
     *Parser\NameBuffer = Space( *Parser\NameBufferSize )
   EndIf
   
-  Define.i Index
+  ;;;;TODO: support stripping prefixes and suffixes in canonicalization (problem: probably wants to be specific to a definition kind)
+  ; Collect the identifier and canonicalize it at the same time (i.e. do away with
+  ; naming conventions such that we can later print the identifier in whatever naming
+  ; convention the user prefers; forestalls any but_I_like_my_identifiers_like_this).
+  Define.i ReadIndex = 0
+  Define.i WriteIndex = 0
+  Define.i WordLength = 0
+  Define.b LastWasUpperOrUnderscore = #False
   Define *Buffer = @*Parser\NameBuffer
-  For Index = 0 To Length - 1
-    Define.c Char = ToLower( PeekB( *StartPosition + Index ) )
-    PokeC( *Buffer + Index * SizeOf( Character ), Char )
-  Next
-  PokeC( *Buffer + Index * SizeOf( Character ), #NUL )
+  While ReadIndex < Length
+    
+    Define.c Char = PeekB( *StartPosition + ReadIndex )
+    
+    ; Figure out whether it's a separator.
+    If IsUpper( Char ) Or Char = '_'
+      If WordLength > 0 And Not LastWasUpperOrUnderscore
+        PokeC( *Buffer + WriteIndex * SizeOf( Character ), '_' )
+        WriteIndex + 1
+      EndIf
+      Char = ToLower( Char )
+      WordLength = 0
+      LastWasUpperOrUnderscore = #True
+    Else
+      LastWasUpperOrUnderscore = #False
+    EndIf
+    
+    PokeC( *Buffer + WriteIndex * SizeOf( Character ), Char )
+    WordLength + 1
+    WriteIndex + 1
+    ReadIndex + 1
+    
+  Wend
+  PokeC( *Buffer + WriteIndex * SizeOf( Character ), #NUL )
   
   Define *Element = FindMapElement( Code\IdentifierTable(), *Parser\NameBuffer )
   If *Element = #Null
-    Define.s Name = Left( *Parser\NameBuffer, Length )
+    Define.s Name = Left( *Parser\NameBuffer, WriteIndex )
     If ArraySize( Code\Identifiers() ) = Code\IdentifierCount
       ReDim Code\Identifiers.s( Code\IdentifierCount + 512 )
     EndIf
@@ -257,6 +430,8 @@ EndProcedure
 
 ; Returns index of definition or -1 on failure.
 Procedure.i ParseDefinition( *Parser.Parser )
+  
+  ; Parse annotations.
   
   ; Parse modifiers.
   Define.i Flags = 0
@@ -283,12 +458,27 @@ Procedure.i ParseDefinition( *Parser.Parser )
     ReDim Code\Definitions.Definition( Code\DefinitionCount + 256 )
   EndIf
   Define.i DefinitionIndex = Code\DefinitionCount
-  Code\Definitions( DefinitionIndex )\Flags = Flags
-  Code\Definitions( DefinitionIndex )\Name = Name
-  Code\Definitions( DefinitionIndex )\Type = Type
+  Define *Definition.Definition = @Code\Definitions( DefinitionIndex )
+  *Definition\Flags = Flags
+  *Definition\Name = Name
+  *Definition\Type = Type
+  *Definition\NextDefinitionInScope = -1
+  *Definition\InnerScope = -1
+  *Definition\FirstAnnotation = -1
+  *Definition\FirstClause = -1
   Code\DefinitionCount + 1
   
-  ; Parse parameters.
+  ; Add to scope.
+  If *Parser\CurrentDefinitionInScope <> -1
+    Code\Definitions( *Parser\CurrentDefinitionInScope )\NextDefinitionInScope = DefinitionIndex
+  Else
+    Code\Scopes( *Parser\CurrentScope )\FirstDefinition = DefinitionIndex
+  EndIf
+  *Parser\CurrentDefinitionInScope = DefinitionIndex
+  
+  ; Parse type parameters.
+  
+  ; Parse value parameters.
   
   ; Parse clauses.
   
@@ -307,11 +497,12 @@ EndProcedure
 
 Procedure ParseText()
   
-  ResetStructure( @Code, Code )
+  ResetCode()
   
   Define.Parser Parser
   Parser\Position = *Text
   Parser\EndPosition = *Text + TextLength
+  Parser\CurrentDefinitionInScope = -1
   
   While Parser\Position < Parser\EndPosition
     If ParseDefinition( @Parser ) = -1
@@ -332,30 +523,37 @@ Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
   Define.i Length = MemoryStringLength( *Buffer, #PB_UTF8 )
   Parser\Position = *Buffer
   Parser\EndPosition = *Buffer + Length
+  Parser\CurrentDefinitionInScope = -1
   Assert( Fn( @Parser ) = Expected )
   FreeMemory( *Buffer )
 EndProcedure
 
 ProcedureUnit CanParseModifier()
-  ResetStructure( @Code, Code )
+  ResetCode()
   TestParseText( @ParseModifier(), "abstract", #IsAbstract )
   TestParseText( @ParseModifier(), "ABSTRACT", #IsAbstract )
 EndProcedureUnit
 
 ProcedureUnit CanParseIdentifier()
-  ResetStructure( @Code, Code )
+  ResetCode()
   TestParseText( @ParseIdentifier(), "Foobar", 0 )
   Assert( Code\IdentifierCount = 1 )
   Assert( FindMapElement( Code\IdentifierTable(), "foobar" ) <> #Null )
   Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foobar" ) ) = 0 )
+  ResetCode()
   TestParseText( @ParseIdentifier(), "FOOBAR", 0 )
   Assert( Code\IdentifierCount = 1 )
   Assert( FindMapElement( Code\IdentifierTable(), "foobar" ) <> #Null )
   Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foobar" ) ) = 0 )
+  ResetCode()
+  TestParseText( @ParseIdentifier(), "FooBar", 0 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( FindMapElement( Code\IdentifierTable(), "foo_bar" ) <> #Null )
+  Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foo_bar" ) ) = 0 )
 EndProcedureUnit
 
 ProcedureUnit CanParseSimpleTypeDefinition()
-  ResetStructure( @Code, Code )
+  ResetCode()
   TestParseText( @ParseDefinition(), "type First;", 0 )
   Assert( Code\DefinitionCount = 1 )
   Assert( Code\IdentifierCount = 1 )
@@ -366,8 +564,213 @@ ProcedureUnit CanParseSimpleTypeDefinition()
 EndProcedureUnit
 
 ;==============================================================================
+; Code generation.
+;;;;TODO: put this stuff on a thread
 
-Procedure FlushText()
+Structure Asset
+EndStructure
+
+Structure Field
+  Name.s
+EndStructure
+
+; Type codes are type indices offset by the number of built-in types.
+Enumeration BuiltinType
+  #Int32Type
+  #Int64Type
+  #Float32Type
+  #Float64Type
+EndEnumeration
+
+EnumerationBinary TypeFlags
+  #TypeIsArray
+EndEnumeration
+
+; No inheritance/derivation.
+Structure Type
+  Name.s
+  SizeInBytes.i
+  Flags.i
+EndStructure
+
+Enumeration InstructionCode
+  #CallInsn
+  #BranchInsn
+  #JumpInsn
+  #AddInsn
+  #SubtractInsn
+  #MultiplyInsn
+  #DivideInsn
+  #LoadInsn
+  #StoreInsn ; Void value instruction.
+EndEnumeration
+
+EnumerationBinary InstructionFlags
+  #InsnIsInteger
+  #InsnIsFloat
+  #InsnIsWide ; Makes int or float 64bit.
+  #InsnIsVectored
+EndEnumeration
+
+; Instructions are fixed-width SSA.
+Structure Instruction
+EndStructure
+
+; All functions are fully symmetric, i.e. 1 argument value, 1 result value.
+Structure Function
+  Name.s
+  ArgumentType.i
+  ResultType.i
+  FirstInstruction.i
+  InstructionCount.i
+EndStructure
+
+Structure Object
+  Type.i
+  ConstructorFunction.i
+EndStructure
+
+Structure Program
+  AssetCount.i
+  FunctionCount.i
+  TypeCount.i
+  ObjectCount.i
+  InstructionCount.i
+  Array Assets.Asset( 1 )
+  Array Functions.Function( 1 )
+  Array Types.Type( 1 )
+  Array Objects.Object( 1 )
+  Array Instructions.Instruction( 1 )
+EndStructure
+
+; For now, we only support a single program in source.
+Global Program.Program
+
+Structure GenType
+EndStructure
+
+Structure GenField
+EndStructure
+
+Structure GenFunction
+EndStructure
+
+Structure GenObject
+EndStructure
+
+;;;;TODO: would be more efficient to fold this into the parsing pass
+Procedure Collect( Map Types.GenType(), Map Fields.GenField(), Map Functions.GenFunction(), Map Objects.GenObject() )
+  
+  Define.i DefinitionIndex
+  For DefinitionIndex = 0 To Code\DefinitionCount - 1
+    
+    Define *Definition.Definition = @Code\Definitions( DefinitionIndex )
+    
+    ;;;;TODO: probably need to ultimately mangle names here
+    Define.s Name = Code\Identifiers( *Definition\Name )
+    
+    Select *Definition\Type
+        
+      Case #TypeDefinition
+        
+        If FindMapElement( Types(), Name ) <> #Null
+          ;;;;TODO: add diagnostic
+          Debug "Type already defined!"
+          Continue
+        EndIf
+        
+        Define *GenType.GenType = AddMapElement( Types(), Name )
+        
+    EndSelect
+    
+  Next
+  
+EndProcedure
+
+Procedure GenTypes( Map Types.GenType(), Map Fields.GenField() )
+  
+  ;;;;TODO: typecheck....
+  
+  ForEach Types()
+    
+    Define.GenType *GenType = Types()
+    
+    If ArraySize( Program\Types() ) = Program\TypeCount
+      ReDim Program\Types( Program\TypeCount + 512 )
+    EndIf
+    Define.i TypeIndex = Program\TypeCount
+    Define.Type *Type = @Program\Types( TypeIndex )
+    Program\TypeCount + 1
+    
+    *Type\Name = MapKey( Types() )
+    
+  Next
+  
+EndProcedure
+
+Procedure GenFunctions()
+EndProcedure
+
+Procedure GenObjects()
+EndProcedure
+
+Procedure GenAssets()
+EndProcedure
+
+; Translate `Code` into `Program`.
+Procedure TranslateProgram()
+  
+  ResetStructure( @Program, Program )
+  
+  NewMap Types.GenType()
+  NewMap Fields.GenField()
+  NewMap Functions.GenFunction()
+  NewMap Objects.GenObject()
+  
+  Collect( Types(), Fields(), Functions(), Objects() )
+  
+  GenTypes( Types(), Fields() )
+  GenFunctions()
+  GenObjects()
+  GenAssets()
+  
+EndProcedure
+
+Procedure SendProgram()
+EndProcedure
+
+Procedure UpdateProgram()
+  ParseText()
+  ;;;;TODO: update annotations
+  If Code\ErrorCount > 0
+    ProcedureReturn
+  EndIf
+  TranslateProgram()
+  If Code\ErrorCount > 0
+    ProcedureReturn
+  EndIf
+  SendProgram()
+EndProcedure
+
+ProcedureUnit CanCompileSimpleProgram()
+  Define.s Text = ~"type FirstType;\n" +
+                  ~"type SecondType;\n"
+  *Text = UTF8( Text )
+  TextLength = Len( Text )
+  UpdateProgram()
+  Assert( Program\TypeCount = 2 )
+  Assert( Program\Types( 0 )\Name = "first_type" )
+  Assert( Program\Types( 1 )\Name = "second_type" )
+  FreeMemory( *Text )
+EndProcedureUnit
+
+;==============================================================================
+
+Procedure Status( Message.s )
+  StatusBarText( StatusBar, 1, Message )  
+EndProcedure
+
+Procedure FlushText( Recompile.b = #True )
   
   If ScintillaSendMessage( Scintilla, #SCI_GETMODIFY ) = 0
     ProcedureReturn
@@ -384,7 +787,9 @@ Procedure FlushText()
   TruncateFile( TextFile )
   ScintillaSendMessage( Scintilla, #SCI_SETSAVEPOINT )
   
-  ParseText()
+  If Recompile
+    UpdateProgram()
+  EndIf
   
 EndProcedure
 
@@ -415,7 +820,8 @@ EndProcedure
 ;==============================================================================
 ; Main loop.
 
-ParseText()
+UpdateProgram()
+Status( "Waiting for Unity to connect..." )
 
 Repeat
   
@@ -429,17 +835,16 @@ Repeat
         Case #WINDOW_NETWORK_TIMER
           Select NetworkServerEvent( Server )
             Case #PB_NetworkEvent_Connect
-              Debug "Unity connected"
+              Status( "Waiting for Unity to build player..." )
               UnityClient = EventClient()
               SendString( "build" )
               UnityClientStatus = #WaitingForClientToBuild
               
             Case #PB_NetworkEvent_Disconnect
-              Debug "Unity disconnected"
+              Status( "Unity disconnected." )
               UnityClient = 0
               
             Case #PB_NetworkEvent_Data
-              Debug "Unity data received"
               Define.i ReadResult = ReceiveNetworkData( EventClient(), *UnityClientNetworkBuffer, 65536 )
               If ReadResult <= 0
                 Debug "Read failure!!"
@@ -452,8 +857,9 @@ Repeat
                     UnityClientStatus = #WaitingForClientIdle
                     If Text = "build failure"
                       ;;;;TODO: handle failure
-                      Debug "Build failed!!"
+                      Status( "Build failed!" )
                     Else
+                      Status( "Starting player..." )
                       Define.i HWND = GadgetID( PlayerContainer )
                       UnityPlayer = RunProgram( UnityPlayerExecutablePath, "-parentHWND " + Str( HWND ), "", #PB_Program_Open | #PB_Program_Read )
                     EndIf
@@ -466,7 +872,8 @@ Repeat
   
 Until Event = #PB_Event_CloseWindow
 
-FlushText()
+Status( "Exiting." )
+FlushText( #False )
 ;;;;TODO: shut down Unity more elegantly...
 If UnityEditor <> 0
   KillProgram( UnityEditor )
@@ -480,19 +887,30 @@ EndIf
 ;[X] Full-screen text view
 ;[X] Text is saved and loaded
 ;[X] Type definition is parsed
-;[X] Unity is launched in background
+;[X] Unity is launched in backgroundz
 ;[X] Unity connects over network
 ;[X] Unity player is built
 ;[X] Unity player is executed
 ;[X] Unity player window is embedded into IDE window
-;[ ] Output code is generated
-;[ ] Output code is being run
+;[ ] Program is generated
+;[ ] Program is transferred to player
+;[ ] Program is being run
+;[ ] Program is migrated from one run to the next
+;[ ] Can add asset to project
+;[ ] Assets are being built and rebuilt into asset bundles
+;[ ] Player can load asset bundles
 ;[ ] Can add&render display element (sprite or model)
 ;[ ] Can animate display element in code
 
 ; ....
 
-;[ ] 
+;[ ] Diagnostics are shown as annotations on code
+;[ ] Can generate docs from code
+;[ ] Can run tests from code in player
+;[ ] Syntax highlighting in text editor
+;[ ] Auto-completion in text editor
+
+;[ ] Vim mode
 
 ; What I want
 ; - All tests are being run continuously on all connected players (smart execution to narrow down run sets)
@@ -500,8 +918,13 @@ EndIf
 ; - Changes are picked up automatically and reload the application automatically to a known state and from there, continue with the changes applied
 ; - The toolchain is configured entirely from within annotations in the code
 
+
+; Qs:
+; - How do I not make it depend on total program size but rather on change size?
+; - How would scenes be created in a graphical way?
+; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 490
-; FirstLine = 441
-; Folding = ---
+; CursorPosition = 547
+; FirstLine = 512
+; Folding = -----
 ; EnableXP
