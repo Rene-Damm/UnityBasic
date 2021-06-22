@@ -7,14 +7,19 @@
   <section name="data">
     <explorer view="..\AeonFlux_PureBasic\" pattern="0"/>
     <log show="1"/>
-    <lastopen date="2021-06-21 13:30" user="Rene Damm" host="VORKRAFT"/>
+    <lastopen date="2021-06-21 23:46" user="Rene Damm" host="VORKRAFT"/>
   </section>
-  <section name="files"/>
+  <section name="files">
+    <file name="UnityBasic.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="51497fb3399b5f02a16f0851df7367fd"/>
+    </file>
+  </section>
   <section name="targets">
     <target name="Default Target" enabled="1" default="1">
-      <inputfile value=""/>
+      <inputfile value="UnityBasic.pb"/>
       <outputfile value=""/>
-      <options xpskin="1" debug="1"/>
+      <options xpskin="1" dpiaware="1" onerror="1" debug="1"/>
     </target>
   </section>
 </project>

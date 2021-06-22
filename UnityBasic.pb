@@ -53,7 +53,16 @@ ScintillaSendMessage( Scintilla, #SCI_SETREADONLY, 0 )
 
 SetActiveGadget( Scintilla )
 
-Global.i Unity = RunProgram( UnityExecutablePath, ~"-batchmode -projectPath \"" + GeneratedPathProject + ~"\" -executeMethod EditorTooling.ConnectClient", "", #PB_Program_Open | #PB_Program_Read )
+Enumeration ClientStatus
+  #WaitingForClientToConnect
+  #WaitingForClientToBuild
+  #WaitingForClientToRun
+EndEnumeration
+
+Global.i Unity = RunProgram( UnityExecutablePath, ~"-batchmode -projectPath \"" + GeneratedPathProject + ~"\" -executeMethod EditorTooling.Run", "", #PB_Program_Open | #PB_Program_Read )
+Global.i UnityClient
+Global.i UnityClientStatus = #WaitingForClientToConnect
+Global *UnityClientNetworkBuffer = AllocateMemory( 65536 ) ; Max length of TCP message.
 
 ;==============================================================================
 
@@ -369,6 +378,30 @@ Procedure FlushText()
   
 EndProcedure
 
+; Sends some text to the Unity subprocess.
+Procedure SendString( String.s )
+  
+  CompilerIf #False
+  Define.i Length = StringByteLength( String, #PB_UTF8 )
+  Define *Buffer = AllocateMemory( Length + SizeOf( Word ) )
+  
+  PokeW( *Buffer, Length )
+  PokeS( *Buffer + SizeOf( Word ), String, Length, #PB_UTF8 | #PB_String_NoZero )
+  
+  SendNetworkData( UnityClient, *Buffer, Length + SizeOf( Word ) )
+  CompilerEndIf
+  
+  Define.i Length = StringByteLength( String, #PB_UTF8 )
+  Define *Buffer = AllocateMemory( Length )
+  
+  PokeS( *Buffer, String, Length, #PB_UTF8 | #PB_String_NoZero )
+  
+  SendNetworkData( UnityClient, *Buffer, Length )
+  
+  FreeMemory( *Buffer )
+  
+EndProcedure
+
 ;==============================================================================
 ; Main loop.
 
@@ -387,12 +420,23 @@ Repeat
           Select NetworkServerEvent( Server )
             Case #PB_NetworkEvent_Connect
               Debug "Unity connected"
+              UnityClient = EventClient()
+              SendString( "build" )
+              UnityClientStatus = #WaitingForClientToBuild
               
             Case #PB_NetworkEvent_Disconnect
               Debug "Unity disconnected"
+              UnityClient = 0
               
             Case #PB_NetworkEvent_Data
-              Debug "Data"
+              Debug "Unity data received"
+              Define.i ReadResult = ReceiveNetworkData( EventClient(), *UnityClientNetworkBuffer, 65536 )
+              If ReadResult <= 0
+                Debug "Read failure!!"
+              Else
+                Define.s Text = PeekS( *UnityClientNetworkBuffer, ReadResult, #PB_UTF8 | #PB_ByteLength )
+                Debug "Data " + Text
+              EndIf
           EndSelect
       EndSelect
   EndIf
@@ -410,7 +454,7 @@ EndIf
 ;[X] Type definition is parsed
 ;[X] Unity is launched in background
 ;[X] Unity connects over network
-;[ ] Unity player is built
+;[X] Unity player is built
 ;[ ] Unity player is executed and window embedded
 ;[ ] Output code is generated
 
@@ -422,7 +466,7 @@ EndIf
 ; - The toolchain is configured entirely from within annotations in the code
 
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 411
-; FirstLine = 367
+; CursorPosition = 454
+; FirstLine = 406
 ; Folding = ---
 ; EnableXP
