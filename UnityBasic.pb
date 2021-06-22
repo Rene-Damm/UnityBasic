@@ -1,7 +1,8 @@
 
 EnableExplicit
 
-Define.s UnityExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
+Define.s UnityEditorExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
+Define.s UnityPlayerExecutablePath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject\Builds\UnityBasic64.exe"
 Define.s GeneratedPathProject = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
 Define.s SourceProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
 Define.s TextFilePath = SourceProjectPath + "\TestFile.code"
@@ -56,10 +57,11 @@ SetActiveGadget( Scintilla )
 Enumeration ClientStatus
   #WaitingForClientToConnect
   #WaitingForClientToBuild
-  #WaitingForClientToRun
+  #WaitingForClientIdle
 EndEnumeration
 
-Global.i Unity = RunProgram( UnityExecutablePath, ~"-batchmode -projectPath \"" + GeneratedPathProject + ~"\" -executeMethod EditorTooling.Run", "", #PB_Program_Open | #PB_Program_Read )
+Global.i UnityEditor = RunProgram( UnityEditorExecutablePath, ~"-batchmode -projectPath \"" + GeneratedPathProject + ~"\" -executeMethod EditorTooling.Run", "", #PB_Program_Open | #PB_Program_Read )
+Global.i UnityPlayer
 Global.i UnityClient
 Global.i UnityClientStatus = #WaitingForClientToConnect
 Global *UnityClientNetworkBuffer = AllocateMemory( 65536 ) ; Max length of TCP message.
@@ -436,6 +438,18 @@ Repeat
               Else
                 Define.s Text = PeekS( *UnityClientNetworkBuffer, ReadResult, #PB_UTF8 | #PB_ByteLength )
                 Debug "Data " + Text
+                Select UnityClientStatus
+                    
+                  Case #WaitingForClientToBuild
+                    UnityClientStatus = #WaitingForClientIdle
+                    If Text = "build failure"
+                      ;;;;TODO: handle failure
+                      Debug "Build failed!!"
+                    Else
+                      UnityPlayer = RunProgram( UnityPlayerExecutablePath, "", "", #PB_Program_Open | #PB_Program_Read )
+                    EndIf
+                    
+                EndSelect
               EndIf
           EndSelect
       EndSelect
@@ -444,9 +458,14 @@ Repeat
 Until Event = #PB_Event_CloseWindow
 
 FlushText()
-If Unity <> 0
-  KillProgram( Unity ) ;;;;TODO: shut down Unity more elegantly...
-  CloseProgram( Unity )
+;;;;TODO: shut down Unity more elegantly...
+If UnityEditor <> 0
+  KillProgram( UnityEditor )
+  CloseProgram( UnityEditor )
+EndIf
+If UnityPlayer <> 0
+  KillProgram( UnityPlayer )
+  CloseProgram( UnityPlayer )
 EndIf
 
 ;[X] Full-screen text view
@@ -455,8 +474,10 @@ EndIf
 ;[X] Unity is launched in background
 ;[X] Unity connects over network
 ;[X] Unity player is built
-;[ ] Unity player is executed and window embedded
+;[X] Unity player is executed
+;[ ] Unity player window is embedded into IDE window
 ;[ ] Output code is generated
+;[ ] Output code is being run
 
 
 ; What I want
@@ -466,7 +487,7 @@ EndIf
 ; - The toolchain is configured entirely from within annotations in the code
 
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 454
-; FirstLine = 406
+; CursorPosition = 476
+; FirstLine = 433
 ; Folding = ---
 ; EnableXP

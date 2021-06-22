@@ -7,27 +7,6 @@ using UnityEngine;
 
 public static class EditorTooling
 {
-    public static bool BuildPlayer()
-    {
-        var options = new BuildPlayerOptions
-        {
-            target = BuildTarget.StandaloneWindows64,
-            locationPathName = "Builds/UnityBasic64.exe"
-        };
-
-        var report = BuildPipeline.BuildPlayer(options);
-        switch (report.summary.result)
-        {
-            case BuildResult.Succeeded:
-                Debug.Log("EditorTooling.BuildPlayer success");
-                return true;
-            
-            default:
-                Debug.Log("EditorTooling.BuildPlayer failure");
-                return false;
-        }
-    }
-
     private static TcpClient s_Client;
 
     public static async void Run()
@@ -51,10 +30,8 @@ public static class EditorTooling
                         if (!BuildPlayer())
                             Send("build failure");
                         else
-                            Send("build success");
+                            Send("Builds/UnityBasic64.exe");
                     };
-                    break;
-                case "run":
                     break;
             }
         }
@@ -77,5 +54,26 @@ public static class EditorTooling
         var numRead = await stream.ReadAsync(buffer, 0, 4 * 1024);
 
         return Encoding.UTF8.GetString(buffer, 0, numRead);
+    }
+
+    private static bool BuildPlayer()
+    {
+        var options = new BuildPlayerOptions
+        {
+            target = BuildTarget.StandaloneWindows64,
+            locationPathName = "Builds/UnityBasic64.exe"
+        };
+
+        var report = BuildPipeline.BuildPlayer(options);
+        switch (report.summary.result)
+        {
+            case BuildResult.Succeeded:
+                Debug.Log("EditorTooling.BuildPlayer success");
+                return true;
+            
+            default:
+                Debug.Log("EditorTooling.BuildPlayer failure");
+                return false;
+        }
     }
 }
