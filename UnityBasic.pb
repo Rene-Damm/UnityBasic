@@ -43,12 +43,13 @@ Define.i ContentHeight = WindowHeight - StatusBarHeight( StatusBar )
 Global.i Scintilla = ScintillaGadget( #PB_Any, 0, 0, ContentWidth / 2, ContentHeight, 0 )
 Define.i DocViewer = WebGadget( #PB_Any, ContentWidth / 2, 0, ContentWidth / 2, ContentHeight / 2, "file:///" + ReplaceString( GeneratedDocsPath, "\", "/" ) + "/index.html" )
 Define.i PlayerContainer = ContainerGadget( #PB_Any, ContentWidth / 2, ContentHeight / 2, ContentWidth / 2 , ContentHeight / 2 )
+
+;;;;TODO: layout using splitters instead of fixed proportions
 ;Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, 0, 0, 0 )
 ;Define.i DocViewer = WebGadget( #PB_Any, 0, 0, 0, 0, "https://unity3d.com" )
 ;Define.i PlayerContainer = ContainerGadget( #PB_Any, 0, 0, 0, 0 )
 ;Define.i HorizontalSplitter = SplitterGadget( #PB_Any, 0, 0, 0, 0, DocViewer, PlayerContainer )
 ;Define.i VerticalSplitter = SplitterGadget( #PB_Any, 0, 0, WindowWidth, WindowHeight, Scintilla, HorizontalSplitter, #PB_Splitter_Vertical )
-
 
 #WINDOW_SAVE_TIMER = 0
 #WINDOW_NETWORK_TIMER = 1
@@ -73,16 +74,19 @@ ScintillaSendMessage( Scintilla, #SCI_SETREADONLY, 0 )
 
 SetActiveGadget( Scintilla )
 
-Enumeration ClientStatus
-  #WaitingForClientToConnect
-  #WaitingForClientToBuild
-  #WaitingForClientIdle
+Enumeration Status
+  #WaitingForEditorToConnect
+  #WaitingForEditorToBuildPlayer
+  #WaitingForPlayerToConnect
+  #ReadyState
+  #BadState ; States we can't yet recover from.
 EndEnumeration
 
 Global.i UnityEditor = RunProgram( UnityEditorExecutablePath, ~"-batchmode -projectPath \"" + GeneratedProjectPath + ~"\" -executeMethod EditorTooling.Run", "", #PB_Program_Open | #PB_Program_Read )
 Global.i UnityPlayer
-Global.i UnityClient
-Global.i UnityClientStatus = #WaitingForClientToConnect
+Global.i UnityEditorClient
+Global.i UnityPlayerClient
+Global.i UnityStatus = #WaitingForEditorToConnect
 Global *UnityClientNetworkBuffer = AllocateMemory( 65536 ) ; Max length of TCP message.
 
 ;==============================================================================
@@ -793,25 +797,15 @@ Procedure FlushText( Recompile.b = #True )
   
 EndProcedure
 
-; Sends some text to the Unity subprocess.
-Procedure SendString( String.s )
-  
-  CompilerIf #False
-  Define.i Length = StringByteLength( String, #PB_UTF8 )
-  Define *Buffer = AllocateMemory( Length + SizeOf( Word ) )
-  
-  PokeW( *Buffer, Length )
-  PokeS( *Buffer + SizeOf( Word ), String, Length, #PB_UTF8 | #PB_String_NoZero )
-  
-  SendNetworkData( UnityClient, *Buffer, Length + SizeOf( Word ) )
-  CompilerEndIf
-  
+; Sends some text to a Unity subprocess.
+Procedure SendString( Client.i, String.s )
+    
   Define.i Length = StringByteLength( String, #PB_UTF8 )
   Define *Buffer = AllocateMemory( Length )
   
   PokeS( *Buffer, String, Length, #PB_UTF8 | #PB_String_NoZero )
   
-  SendNetworkData( UnityClient, *Buffer, Length )
+  SendNetworkData( Client, *Buffer, Length )
   
   FreeMemory( *Buffer )
   
@@ -821,7 +815,7 @@ EndProcedure
 ; Main loop.
 
 UpdateProgram()
-Status( "Waiting for Unity to connect..." )
+Status( "Waiting for Unity editor to connect..." )
 
 Repeat
   
@@ -835,14 +829,32 @@ Repeat
         Case #WINDOW_NETWORK_TIMER
           Select NetworkServerEvent( Server )
             Case #PB_NetworkEvent_Connect
-              Status( "Waiting for Unity to build player..." )
-              UnityClient = EventClient()
-              SendString( "build" )
-              UnityClientStatus = #WaitingForClientToBuild
+              Select UnityStatus
+                  
+                Case #WaitingForEditorToConnect
+                  UnityEditorClient = EventClient()
+                  Status( "Waiting for Unity editor to build player..." )
+                  SendString( UnityEditorClient, "build" )
+                  UnityStatus = #WaitingForEditorToBuildPlayer
+                  
+                Case #WaitingForPlayerToConnect
+                  UnityPlayerClient = EventClient()
+                  Status( "Unity player connected." )
+                  SendProgram()
+                  UnityStatus = #ReadyState
+                  
+              EndSelect
               
             Case #PB_NetworkEvent_Disconnect
-              Status( "Unity disconnected." )
-              UnityClient = 0
+              If EventClient() = UnityEditorClient
+                Status( "Unity editor disconnected." )
+                UnityEditorClient = 0
+                UnityStatus = #BadState
+              ElseIf EventClient() = UnityPlayerClient
+                Status( "Unity player disconnected." )
+                UnityPlayerClient = 0
+                UnityStatus = #BadState
+              EndIf
               
             Case #PB_NetworkEvent_Data
               Define.i ReadResult = ReceiveNetworkData( EventClient(), *UnityClientNetworkBuffer, 65536 )
@@ -851,17 +863,20 @@ Repeat
               Else
                 Define.s Text = PeekS( *UnityClientNetworkBuffer, ReadResult, #PB_UTF8 | #PB_ByteLength )
                 Debug "Data " + Text
-                Select UnityClientStatus
+                Select UnityStatus
                     
-                  Case #WaitingForClientToBuild
-                    UnityClientStatus = #WaitingForClientIdle
-                    If Text = "build failure"
-                      ;;;;TODO: handle failure
-                      Status( "Build failed!" )
-                    Else
-                      Status( "Starting player..." )
-                      Define.i HWND = GadgetID( PlayerContainer )
-                      UnityPlayer = RunProgram( UnityPlayerExecutablePath, "-parentHWND " + Str( HWND ), "", #PB_Program_Open | #PB_Program_Read )
+                  Case #WaitingForEditorToBuildPlayer
+                    If EventClient() = UnityEditorClient
+                      If Text = "build failure"
+                        ;;;;TODO: handle failure
+                        Status( "Build failed!" )
+                        UnityStatus = #BadState
+                      Else
+                        UnityStatus = #WaitingForPlayerToConnect
+                        Status( "Starting player..." )
+                        Define.i HWND = GadgetID( PlayerContainer )
+                        UnityPlayer = RunProgram( UnityPlayerExecutablePath, "-parentHWND " + Str( HWND ), "", #PB_Program_Open | #PB_Program_Read )
+                      EndIf
                     EndIf
                     
                 EndSelect
@@ -892,7 +907,8 @@ EndIf
 ;[X] Unity player is built
 ;[X] Unity player is executed
 ;[X] Unity player window is embedded into IDE window
-;[ ] Program is generated
+;[X] Program is generated
+;[X] Unity player connects to IDE
 ;[ ] Program is transferred to player
 ;[ ] Program is being run
 ;[ ] Program is migrated from one run to the next
@@ -924,7 +940,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 547
-; FirstLine = 512
+; CursorPosition = 911
+; FirstLine = 885
 ; Folding = -----
 ; EnableXP
