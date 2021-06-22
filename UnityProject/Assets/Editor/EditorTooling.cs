@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
@@ -9,6 +10,7 @@ using UnityEngine;
 public static class EditorTooling
 {
     private static TcpClient s_Client;
+    private static HttpListener s_AssetServer;
 
     public static async void Run()
     {
@@ -16,13 +18,16 @@ public static class EditorTooling
         s_Client = new TcpClient();
         await s_Client.ConnectAsync("127.0.0.1", 10978);
 
-        while (true)
+        var exit = false;
+        while (!exit)
         {
             var message = await Receive();
-            if (message == "exit")
-                break;
             switch (message)
             {
+                case "exit":
+                    exit = true;
+                    break;
+                
                 case "build":
                     // Building directly from here results in "PlayerLoop internal function has been
                     // called recursively error" so put the call on the editor update loop instead.
@@ -59,6 +64,8 @@ public static class EditorTooling
 
     private static bool BuildPlayer()
     {
+        ////TODO: set company and product name from data transmitted by IDE
+        
         var options = new BuildPlayerOptions
         {
             target = BuildTarget.StandaloneWindows64,

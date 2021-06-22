@@ -74,9 +74,15 @@ ScintillaSendMessage( Scintilla, #SCI_SETREADONLY, 0 )
 
 SetActiveGadget( Scintilla )
 
+;==============================================================================
+; Networking and child processes.
+
+#MAX_MESSAGE_LENGTH = ( 32 * 1024 )
+
 Enumeration Status
   #WaitingForEditorToConnect
   #WaitingForEditorToBuildPlayer
+  #WaitingForEditorToBuildAssetBundles
   #WaitingForPlayerToConnect
   #ReadyState
   #BadState ; States we can't yet recover from.
@@ -87,7 +93,57 @@ Global.i UnityPlayer
 Global.i UnityEditorClient
 Global.i UnityPlayerClient
 Global.i UnityStatus = #WaitingForEditorToConnect
-Global *UnityClientNetworkBuffer = AllocateMemory( 65536 ) ; Max length of TCP message.
+Global *UnityNetworkBuffer = AllocateMemory( #MAX_MESSAGE_LENGTH )
+Global *UnityNetworkBufferPos
+Global.i UnityBatchSendClient
+
+; Sends some text to a Unity subprocess.
+Procedure SendString( Client.i, String.s )
+    
+  Define.i Length = StringByteLength( String, #PB_UTF8 )
+  Define *Buffer = AllocateMemory( Length )
+  
+  PokeS( *Buffer, String, Length, #PB_UTF8 | #PB_String_NoZero )
+  
+  SendNetworkData( Client, *Buffer, Length )
+  
+  FreeMemory( *Buffer )
+  
+EndProcedure
+
+Procedure StartBatchSend( Client.i )
+  *UnityNetworkBufferPos = *UnityNetworkBuffer
+  UnityBatchSendClient = Client
+EndProcedure
+
+Procedure FlushBatch()
+  
+  Define.i Length = *UnityNetworkBufferPos - *UnityNetworkBuffer
+  If Length > 0
+    SendNetworkData( UnityBatchSendClient, *UnityNetworkBuffer, Length )
+  EndIf
+  
+  *UnityNetworkBufferPos = *UnityNetworkBuffer
+  
+EndProcedure
+
+Procedure BatchSendString( String.s )
+  
+  Define.i Length = StringByteLength( String, #PB_UTF8 )
+  Define.i Available = *UnityNetworkBufferPos - *UnityNetworkBuffer
+  If Available < Length + 1 Or Available + Length + 1 > #MAX_MESSAGE_LENGTH
+    FlushBatch()
+  EndIf
+  
+  PokeS( *UnityNetworkBufferPos, String, Length, #PB_UTF8 )
+  *UnityNetworkBufferPos + Length + 1
+  
+EndProcedure
+
+Procedure FinishBatchSend()
+  FlushBatch()
+  UnityBatchSendClient = 0
+EndProcedure
 
 ;==============================================================================
 
@@ -96,9 +152,20 @@ Structure TextRegion
   RightPos.i
 EndStructure
 
+;;;;REVIEW: allow specifying annotations that only relate to a certain build platform?
 Enumeration AnnotationKind
+  
+  ; Doc annotations.
   #DescriptionAnnotation
+  #DetailsAnnotation
+  
+  ; Asset annotations.
   #AssetAnnotation
+  
+  ; Program annotations.
+  #CompanyAnnotation
+  #ProductAnnotation
+  
 EndEnumeration
 
 ; Annotations are free-form text blobs that can be attached to definitions.
@@ -112,11 +179,13 @@ EndStructure
 Enumeration ClauseKind
   #PreconditionClause
   #PostconditionClause
+  #WhereClause
 EndEnumeration
 
 ; Clauses are optional forms that can be tagged onto definitions.
 ; They are used for things such as pre- and postconditions.
 Structure Clause
+  Expression.i
   NextClause.i
 EndStructure
 
@@ -134,12 +203,13 @@ CompilerEndIf
 
 Enumeration Operator
   #LiteralExpression
+  #NameExpression
   #LogicalAndExpression
   #LogicalOrExpression
   #LogicalNotExpression
   #BitwiseAndExpression
   #BitwiseOrExpression
-  #CallExpression
+  #CallExpression ; For types, this instantiates the given named type.
   #TupleExpression
 EndEnumeration
 
@@ -188,7 +258,15 @@ EnumerationBinary DefinitionFlags
   #IsMutable
   #IsSingleton ; 'object' in code
   #IsExtend
+  #IsReplace
 EndEnumeration
+
+Structure Parameter
+  Name.i
+  Type.i
+  DefaultExpression.i ; -1 if none.
+  NextParameter.i
+EndStructure
 
 Structure Definition
   Name.i
@@ -199,7 +277,9 @@ Structure Definition
   Region.TextRegion
   NextDefinitionInScope.i
   FirstAnnotation.i ; -1 if none.
-  FirstClause.i ; -1 if none.
+  FirstClause.i     ; -1 if none.
+  FirstTypeParameter.i ; -1 if none.
+  FirstValueParameter.i ; -1 if none.
 EndStructure
 
 Structure Scope
@@ -209,6 +289,8 @@ Structure Scope
 EndStructure
 
 Structure Diagnostic
+  Code.i
+  Index.i ; Array is determined automatically from what type of diagnostic it is (based on `Code`).
 EndStructure
 
 ; Just a bunch of arrays that contain a completely flattened representation of source code.
@@ -221,6 +303,7 @@ Structure Code
   ExpressionCount.i
   AnnotationCount.i
   ClauseCount.i
+  ParameterCount.i
   DiagnosticCount.i
   ErrorCount.i
   WarningCount.i
@@ -232,6 +315,7 @@ Structure Code
   Array Expressions.Expression( 0 )
   Array Annotations.Annotation( 0 )
   Array Clauses.Clause( 0 )
+  Array Parameters.Parameter( 0 )
   Array Diagnostics.Diagnostic( 0 )
 EndStructure
 
@@ -254,8 +338,12 @@ EndProcedure
 Structure Parser
   *Position
   *EndPosition
+  *StartPosition
+  LastRegion.TextRegion
   NameBuffer.s
   NameBufferSize.i
+  CurrentLine.i
+  CurrentColumn.i
   CurrentScope.i
   CurrentDefinitionInScope.i
   ;store failure state here; func to reset
@@ -315,13 +403,21 @@ Procedure.i IsAlphanumeric( Character.c )
   ProcedureReturn IsAlpha( Character )
 EndProcedure
 
-Procedure SkipWhitespace( *Parser.Parser )
+Procedure SkipWhitespace( *Parser.Parser, AllowNewline.b = #True )
   While *Parser\Position < *Parser\EndPosition
     Define.b Char = PeekB( *Parser\Position )
+    If Not AllowNewline And Char = #NEWLINE
+      Break
+    EndIf
     If Not IsWhitespace( Char )
       Break
     EndIf
+    If Char = #NEWLINE
+      *Parser\CurrentLine + 1
+      *Parser\CurrentColumn = 0
+    EndIf
     *Parser\Position + 1
+    *Parser\CurrentColumn + 1
   Wend
 EndProcedure
 
@@ -344,6 +440,7 @@ Procedure.i MatchToken( *Parser.Parser, Token.s, Length.i, AnyFollowing = #False
     EndIf
   EndIf
   *Parser\Position + Index
+  *Parser\CurrentColumn + Index
   ProcedureReturn #True
 EndProcedure
 
@@ -352,11 +449,28 @@ Procedure.i ParseModifier( *Parser.Parser )
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "abstract", 8 )
     ProcedureReturn #IsAbstract
+  ElseIf MatchToken( *Parser, "extend", 6 )
+    ProcedureReturn #IsExtend
+  ElseIf MatchToken( *Parser, "before", 6 )
+    ProcedureReturn #IsBefore
+  ElseIf MatchToken( *Parser, "after", 5 )
+    ProcedureReturn #IsAfter
+  ElseIf MatchToken( *Parser, "around", 6 )
+    ProcedureReturn #IsAround
+  ElseIf MatchToken( *Parser, "mutable", 7 )
+    ProcedureReturn #IsMutable
+  ElseIf MatchToken( *Parser, "immutable", 9 )
+    ProcedureReturn #IsImmutable
+  ElseIf MatchToken( *Parser, "import", 6 )
+    ProcedureReturn #IsImport
+  ElseIf MatchToken( *Parser, "replace", 7 )
+    ProcedureReturn #IsReplace
   EndIf
   ProcedureReturn 0
 EndProcedure
 
 Procedure.i ParseIdentifier( *Parser.Parser )
+  
   SkipWhitespace( *Parser )
   
   ;;;;TODO: escaped identifiers
@@ -380,6 +494,9 @@ Procedure.i ParseIdentifier( *Parser.Parser )
     *Parser\NameBufferSize = Length * 2
     *Parser\NameBuffer = Space( *Parser\NameBufferSize )
   EndIf
+  
+  *Parser\LastRegion\LeftPos = *StartPosition - *Parser\StartPosition
+  *Parser\LastRegion\RightPos = *Parser\LastRegion\LeftPos + Length
   
   ;;;;TODO: support stripping prefixes and suffixes in canonicalization (problem: probably wants to be specific to a definition kind)
   ; Collect the identifier and canonicalize it at the same time (i.e. do away with
@@ -432,19 +549,112 @@ Procedure.i ParseIdentifier( *Parser.Parser )
   
 EndProcedure
 
+Procedure.i ParseAnnotation( *Parser.Parser )
+  
+  Define.i LineBefore = *Parser\CurrentLine
+  SkipWhitespace( *Parser )
+  If *Parser\CurrentLine = LineBefore And *Parser\CurrentLine <> 1
+    ProcedureReturn -1
+  EndIf
+  If Not MatchToken( *Parser, "#", 1, #True )
+    ProcedureReturn -1
+  EndIf
+  
+  Define.i AnnotationKind
+  If MatchToken( *Parser, "description", 11 )
+    AnnotationKind = #DescriptionAnnotation
+  ElseIf MatchToken( *Parser, "details", 7 )
+    AnnotationKind = #DetailsAnnotation
+  ElseIf MatchToken( *Parser, "product", 7 )
+    AnnotationKind = #ProductAnnotation
+  ElseIf MatchToken( *Parser, "company", 7 )
+    AnnotationKind = #CompanyAnnotation
+  Else
+    ;;;;TODO: diagnose
+    Debug "Unknown annotation!"
+  EndIf
+  
+  SkipWhitespace( *Parser, #False )
+  Define *StartPos = *Parser\Position
+  While *Parser\Position < *Parser\EndPosition
+    Define.c Char = PeekB( *Parser\Position )
+    If Char = #NEWLINE
+      Break
+    EndIf
+    *Parser\Position + 1
+  Wend
+  Define.s Text
+  If *Parser\Position > *StartPos
+    Text = PeekS( *StartPos, *Parser\Position - *StartPos, #PB_UTF8 | #PB_ByteLength )
+  EndIf
+  
+  Define.i AnnotationIndex = Code\AnnotationCount
+  If ArraySize( Code\Annotations() ) = AnnotationIndex
+    ReDim Code\Annotations( AnnotationIndex + 512 )
+  EndIf
+  Define.Annotation *Annotation = @Code\Annotations( AnnotationIndex )
+  *Annotation\AnnotationKind = AnnotationKind
+  *Annotation\AnnotationText = Text
+  *Annotation\NextAnnotation = -1
+  Code\AnnotationCount + 1
+  
+  ProcedureReturn AnnotationIndex
+  
+EndProcedure
+
 ; Returns index of definition or -1 on failure.
 Procedure.i ParseDefinition( *Parser.Parser )
   
   ; Parse annotations.
+  Define.i FirstAnnotation = -1
+  Define.i LastAnnotation = -1
+  While *Parser\Position < *Parser\EndPosition
+    Define.i Annotation = ParseAnnotation( *Parser )
+    If Annotation = -1
+      Break
+    EndIf
+    If FirstAnnotation = -1
+      FirstAnnotation = Annotation
+    Else
+      Code\Annotations( LastAnnotation )\NextAnnotation = Annotation
+    EndIf
+    LastAnnotation = Annotation
+  Wend
   
   ; Parse modifiers.
   Define.i Flags = 0
+  While *Parser\Position < *Parser\EndPosition
+    Define.i Modifier = ParseModifier( *Parser )
+    If Modifier = 0
+      Break
+    EndIf
+    If Flags & Modifier
+      ;;;;TODO: diagnose duplicate modifier
+      Debug "Duplicate modifier!!"
+    EndIf
+    Flags | Modifier
+  Wend
   
   ; Parse type.
   Define.i Type = 0
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "type", 4 )
     Type = #TypeDefinition
+  ElseIf MatchToken( *Parser, "object", 6 )
+    Type = #TypeDefinition
+    Flags | #IsSingleton
+  ElseIf MatchToken( *Parser, "method", 6 )
+    Type = #MethodDefinition
+  ElseIf MatchToken( *Parser, "field", 5 )
+    Type = #FieldDefinition
+  ElseIf MatchToken( *Parser, "features", 8 )
+    Type = #FeatureDefinition
+  ElseIf MatchToken( *Parser, "program", 7 )
+    Type = #ProgramDefinition
+  ElseIf MatchToken( *Parser, "library", 7 )
+    Type = #LibraryDefinition
+  ElseIf MatchToken( *Parser, "module", 6 )
+    Type = #ModuleDefinition
   Else
     ;;;;TODO
     ProcedureReturn -1
@@ -468,8 +678,9 @@ Procedure.i ParseDefinition( *Parser.Parser )
   *Definition\Type = Type
   *Definition\NextDefinitionInScope = -1
   *Definition\InnerScope = -1
-  *Definition\FirstAnnotation = -1
+  *Definition\FirstAnnotation = FirstAnnotation
   *Definition\FirstClause = -1
+  *Definition\Region = *Parser\LastRegion
   Code\DefinitionCount + 1
   
   ; Add to scope.
@@ -506,7 +717,10 @@ Procedure ParseText()
   Define.Parser Parser
   Parser\Position = *Text
   Parser\EndPosition = *Text + TextLength
+  Parser\StartPosition = *Text
   Parser\CurrentDefinitionInScope = -1
+  Parser\CurrentLine = 1
+  Parser\CurrentColumn = 1
   
   While Parser\Position < Parser\EndPosition
     If ParseDefinition( @Parser ) = -1
@@ -527,7 +741,10 @@ Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
   Define.i Length = MemoryStringLength( *Buffer, #PB_UTF8 )
   Parser\Position = *Buffer
   Parser\EndPosition = *Buffer + Length
+  Parser\StartPosition = *Buffer
   Parser\CurrentDefinitionInScope = -1
+  Parser\CurrentLine = 1
+  Parser\CurrentColumn = 1
   Assert( Fn( @Parser ) = Expected )
   FreeMemory( *Buffer )
 EndProcedure
@@ -555,6 +772,14 @@ ProcedureUnit CanParseIdentifier()
   Assert( FindMapElement( Code\IdentifierTable(), "foo_bar" ) <> #Null )
   Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foo_bar" ) ) = 0 )
 EndProcedureUnit
+  
+ProcedureUnit CanParseAnnotation()
+  ResetCode()
+  TestParseText( @ParseAnnotation(), "#DESCRIPTION Foo", 0 )
+  Assert( Code\AnnotationCount = 1 )
+  Assert( Code\Annotations( 0 )\AnnotationKind = #DescriptionAnnotation )
+  Assert( Code\Annotations( 0 )\AnnotationText = "Foo" )
+EndProcedureUnit
 
 ProcedureUnit CanParseSimpleTypeDefinition()
   ResetCode()
@@ -565,6 +790,26 @@ ProcedureUnit CanParseSimpleTypeDefinition()
   Assert( Code\Definitions( 0 )\Name = 0 )
   Assert( Code\Definitions( 0 )\Type = #TypeDefinition )
   Assert( Code\Definitions( 0 )\Flags = 0 )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
+EndProcedureUnit
+  
+ProcedureUnit CanParseTypeDefinitionWithAnnotation()
+  ResetCode()
+  TestParseText( @ParseDefinition(), ~"#DESCRIPTION Something\n#DETAILS Foo\ntype First;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\Type = #TypeDefinition )
+  Assert( Code\Definitions( 0 )\Flags = 0 )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = 0 )
+  Assert( Code\AnnotationCount = 2 )
+  Assert( Code\Annotations( 0 )\AnnotationKind = #DescriptionAnnotation )
+  Assert( Code\Annotations( 0 )\AnnotationText = "Something" )
+  Assert( Code\Annotations( 0 )\NextAnnotation = 1 )
+  Assert( Code\Annotations( 1 )\AnnotationKind = #DetailsAnnotation )
+  Assert( Code\Annotations( 1 )\AnnotationText = "Foo" )
+  Assert( Code\Annotations( 1 )\NextAnnotation = -1 )
 EndProcedureUnit
 
 ;==============================================================================
@@ -740,7 +985,38 @@ Procedure TranslateProgram()
   
 EndProcedure
 
+Procedure.s ToTypeMessage( *Type.Type )
+  ProcedureReturn "t|" + *Type\Name
+EndProcedure
+
 Procedure SendProgram()
+  
+  If UnityPlayerClient = 0
+    ProcedureReturn
+  EndIf
+  
+  StartBatchSend( UnityPlayerClient )
+  ;;;;TODO: send program delta for incremental changes instead of resetting all the time
+  BatchSendString( "reset" )
+  
+  Define.i Index
+  
+  ; Send types.
+  For Index = 0 To Program\TypeCount - 1
+    Define.Type *Type = @Program\Types( Index )
+    Define.s Message = ToTypeMessage( *Type )
+    BatchSendString( Message )
+  Next
+  
+  ; Send functions.
+  
+  ; Send objects.
+  
+  ; Send assets.
+  
+  BatchSendString( "commit" )
+  FinishBatchSend()
+  
 EndProcedure
 
 Procedure UpdateProgram()
@@ -797,20 +1073,6 @@ Procedure FlushText( Recompile.b = #True )
   
 EndProcedure
 
-; Sends some text to a Unity subprocess.
-Procedure SendString( Client.i, String.s )
-    
-  Define.i Length = StringByteLength( String, #PB_UTF8 )
-  Define *Buffer = AllocateMemory( Length )
-  
-  PokeS( *Buffer, String, Length, #PB_UTF8 | #PB_String_NoZero )
-  
-  SendNetworkData( Client, *Buffer, Length )
-  
-  FreeMemory( *Buffer )
-  
-EndProcedure
-
 ;==============================================================================
 ; Main loop.
 
@@ -820,6 +1082,8 @@ Status( "Waiting for Unity editor to connect..." )
 Repeat
   
   Define Event = WaitWindowEvent()
+  
+  ;;;;TODO: If F1 is hit with focus on text editor, look up word under cursor in docs and point docs browser to that
   
   If Event = #PB_Event_Timer
     Select EventTimer()
@@ -857,11 +1121,11 @@ Repeat
               EndIf
               
             Case #PB_NetworkEvent_Data
-              Define.i ReadResult = ReceiveNetworkData( EventClient(), *UnityClientNetworkBuffer, 65536 )
+              Define.i ReadResult = ReceiveNetworkData( EventClient(), *UnityNetworkBuffer, #MAX_MESSAGE_LENGTH )
               If ReadResult <= 0
                 Debug "Read failure!!"
               Else
-                Define.s Text = PeekS( *UnityClientNetworkBuffer, ReadResult, #PB_UTF8 | #PB_ByteLength )
+                Define.s Text = PeekS( *UnityNetworkBuffer, ReadResult, #PB_UTF8 | #PB_ByteLength )
                 Debug "Data " + Text
                 Select UnityStatus
                     
@@ -922,6 +1186,8 @@ EndIf
 
 ;[ ] Diagnostics are shown as annotations on code
 ;[ ] Can generate docs from code
+;[ ] Can jump to docs by pressing F1
+;[ ] Can jump to definition by pressing F2
 ;[ ] Can run tests from code in player
 ;[ ] Syntax highlighting in text editor
 ;[ ] Auto-completion in text editor
@@ -940,7 +1206,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 911
-; FirstLine = 885
-; Folding = -----
+; CursorPosition = 617
+; FirstLine = 595
+; Folding = ------
 ; EnableXP

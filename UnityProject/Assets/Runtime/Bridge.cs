@@ -16,43 +16,61 @@ public static class Bridge
         s_Client = new TcpClient();
         await s_Client.ConnectAsync("127.0.0.1", 10978);
 
-        while (true)
+        var exit = false;
+        while (!exit)
         {
-            var message = await Receive();
-            if (message == "exit")
-                break;
-            switch (message)
-            {
-                case "program":
+            var message = await Receive(); 
+            var split = message.Split('\0');
+            foreach (var entry in split)
+                if (!ProcessMessage(entry))
+                {
+                    exit = true;
                     break;
-            }
+                }
         }
     }
-    
-    // Receive an initial program and start running it.
-    private static void StartProgram()
+
+    private static bool ProcessMessage(string message)
     {
-    }
-    
-    // Receive a program path to update the running program.
-    private static void PatchProgram()
-    {
-    }
-    
-    private static async void Send(string message)
-    {
-        var stream = s_Client.GetStream();
-        var buffer = Encoding.UTF8.GetBytes(message);
-        await stream.WriteAsync(buffer, 0, buffer.Length);
+        var split = message.Split('|');
+        if (split.Length < 1)
+            return true;
+
+        switch (split[0])
+        {
+            case "exit":
+                return false;
+            
+            case "commit":
+                Debug.Log("commit");
+                break;
+            
+            case "reset":
+                Debug.Log("reset");
+                break;
+            
+            case "patch":
+                break;
+            
+            case "f":
+                break;
+            
+            case "t":
+                Debug.Log("type " + split[1]);
+                break;
+        }
+
+        return true;
     }
 
     private static async Task<string> Receive()
     {
         var stream = s_Client.GetStream();
 
-        var buffer = new byte[4 * 1024];
-        var numRead = await stream.ReadAsync(buffer, 0, 4 * 1024);
+        var buffer = new byte[32 * 1024];
+        var numRead = await stream.ReadAsync(buffer, 0, buffer.Length);
 
+        // May have embedded NUL characters.
         return Encoding.UTF8.GetString(buffer, 0, numRead);
     }
 }
