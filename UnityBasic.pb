@@ -25,11 +25,18 @@ If Server = 0
   ;;;;TODO: handle error
 EndIf
 
-Define.i WindowWidth = DesktopWidth( 0 )
-Define.i WindowHeight = DesktopHeight( 0 )
+Define.i WindowWidth = DesktopUnscaledX( DesktopWidth( 0 ) )
+Define.i WindowHeight = DesktopUnscaledY( DesktopHeight( 0 ) )
 
-Define Window.i = OpenWindow( #PB_Any, 0, 0, WindowWidth, WindowHeight, "Unity Basic", #PB_Window_BorderLess )
-Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, WindowWidth, WindowHeight, 0 )
+Define Window.i = OpenWindow( #PB_Any, 0, 0, WindowWidth, WindowHeight, "Unity Basic", #PB_Window_BorderLess | #PB_Window_ScreenCentered )
+Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, WindowWidth / 2, WindowHeight, 0 )
+Define.i DocViewer = WebGadget( #PB_Any, WindowWidth / 2, 0, WindowWidth / 2, WindowHeight / 2, "https://unity3d.com" )
+Define.i PlayerContainer = ContainerGadget( #PB_Any, WindowWidth / 2, WindowHeight / 2, WindowWidth / 2 , WindowHeight / 2 )
+;Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, 0, 0, 0 )
+;Define.i DocViewer = WebGadget( #PB_Any, 0, 0, 0, 0, "https://unity3d.com" )
+;Define.i PlayerContainer = ContainerGadget( #PB_Any, 0, 0, 0, 0 )
+;Define.i HorizontalSplitter = SplitterGadget( #PB_Any, 0, 0, 0, 0, DocViewer, PlayerContainer )
+;Define.i VerticalSplitter = SplitterGadget( #PB_Any, 0, 0, WindowWidth, WindowHeight, Scintilla, HorizontalSplitter, #PB_Splitter_Vertical )
 
 #WINDOW_SAVE_TIMER = 0
 #WINDOW_NETWORK_TIMER = 1
@@ -446,7 +453,8 @@ Repeat
                       ;;;;TODO: handle failure
                       Debug "Build failed!!"
                     Else
-                      UnityPlayer = RunProgram( UnityPlayerExecutablePath, "", "", #PB_Program_Open | #PB_Program_Read )
+                      Define.i HWND = GadgetID( PlayerContainer )
+                      UnityPlayer = RunProgram( UnityPlayerExecutablePath, "-parentHWND " + Str( HWND ), "", #PB_Program_Open | #PB_Program_Read )
                     EndIf
                     
                 EndSelect
@@ -475,7 +483,7 @@ EndIf
 ;[X] Unity connects over network
 ;[X] Unity player is built
 ;[X] Unity player is executed
-;[ ] Unity player window is embedded into IDE window
+;[X] Unity player window is embedded into IDE window
 ;[ ] Output code is generated
 ;[ ] Output code is being run
 
@@ -487,7 +495,7 @@ EndIf
 ; - The toolchain is configured entirely from within annotations in the code
 
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 476
-; FirstLine = 433
+; CursorPosition = 485
+; FirstLine = 441
 ; Folding = ---
 ; EnableXP
