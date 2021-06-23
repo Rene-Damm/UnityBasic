@@ -214,6 +214,9 @@ Enumeration AnnotationKind
   #DetailsAnnotation
   #ExampleAnnotation
   #CategoryAnnotation
+  #ReturnsAnnotation
+  #ArgumentAnnotation
+  #TypeArgumentAnnotation
   
   ; Test annotations.
   #TestAnnotation
@@ -224,6 +227,7 @@ Enumeration AnnotationKind
   ; Program annotations.
   #CompanyAnnotation
   #ProductAnnotation
+  #AssetServerAnnotation
   
 EndEnumeration
 
@@ -279,7 +283,7 @@ Enumeration Operator
   #LogicalNotExpression
   #BitwiseAndExpression
   #BitwiseOrExpression
-  #CallExpression ; For types, this instantiates the given named type.
+  #ApplyExpression ; For types, this instantiates the given named type.
   #TupleExpression
 EndEnumeration
 
@@ -293,7 +297,8 @@ Structure Expression
     FirstOperandI.i
     FirstOperandD.d
   EndStructureUnion
-  SecondOperand.i
+  SecondOperandI.i
+  NextExpression.i
 EndStructure
 
 Enumeration StatementKind
@@ -304,6 +309,8 @@ Enumeration StatementKind
   #BreakStatement
   #ContinueStatement
   #IfStatement
+  #ElseIfStatement
+  #ElseStatement
   #SwitchStatement
   #DefinitionStatement
 EndEnumeration
@@ -311,6 +318,7 @@ EndEnumeration
 Structure Statement
   StatementKind.i
   ReferencedIndex.i ; Depends on the kind of statement which array this refers to.
+  InnerScope.i
   NextStatement.i
 EndStructure
 
@@ -366,6 +374,12 @@ Structure Scope
   FirstDefinitionOrStatement.i ; Whether definition or statement depends on the type of scope.
 EndStructure
 
+Enumeration DiagnosticCode
+  
+  ; Syntax errors.
+  
+EndEnumeration
+
 Structure Diagnostic
   Code.i
   Index.i ; Array is determined automatically from what type of diagnostic it is (based on `Code`).
@@ -410,6 +424,26 @@ Procedure ResetCode()
   Code\Scopes( 1 )\Definition = -1
 EndProcedure
 
+Procedure.s FormatDiagnostic( Index.i )
+EndProcedure
+
+Procedure Diagnose( DiagnosticCode.i, Index.i )
+  
+  Define.i DiagnosticIndex = Code\DiagnosticCount
+  If ArraySize( Code\Diagnostics() ) = DiagnosticIndex
+    ReDim Code\Diagnostics( DiagnosticIndex + 32 )
+  EndIf
+  Code\DiagnosticCount + 1
+  
+  Define.Diagnostic *Diagnostic = @Code\Diagnostics( DiagnosticIndex )
+  
+  *Diagnostic\Code = DiagnosticCode
+  *Diagnostic\Index = Index
+  
+  Debug FormatDiagnostic( DiagnosticIndex )
+  
+EndProcedure
+
 ;==============================================================================
 ; Parser.
 ;;;;TODO: put this on a thread
@@ -424,6 +458,7 @@ Structure Parser
   *EndPosition
   *StartPosition
   LastRegion.TextRegion
+  FileName.s
   NameBuffer.s
   NameBufferSize.i
   CurrentLine.i
@@ -435,7 +470,17 @@ Structure Parser
   ;store failure state here; func to reset
 EndStructure
 
+Macro PushContext( Parser, Context )
+  Define.i PreviousContext = Parser\CurrentContext
+  Parser\CurrentContext = Context
+EndMacro
+
+Macro PopContext( Parser )
+  Parser\CurrentContext = PreviousContext
+EndMacro
+
 Macro PushScope( Parser )
+  
   Define.i PreviousScope = Parser\CurrentScope
   Define.i PreviousDefinitionInScope = Parser\CurrentDefinitionInScope
   Define.i PreviousStatementInScope = Parser\CurrentStatement
@@ -448,13 +493,74 @@ Macro PushScope( Parser )
   Parser\CurrentScope = CurrentScope
   Parser\CurrentDefinitionInScope = -1
   Parser\CurrentStatement = -1
+  
 EndMacro
 
 Macro PopScope( Parser )
+  
   Parser\CurrentScope = PreviousScope
   Parser\CurrentDefinitionInScope = PreviousDefinionInScope
   Parser\CurrentStatement = PreviousStatementInScope
   CurrentScope = PreviousScope
+  
+EndMacro
+
+Macro MakeExpressionOpI( IndexVariable, Op, Tp, Operand, StartPos )
+  
+  Define.i IndexVariable = Code\ExpressionCount
+  If ArraySize( Code\Expressions() ) = IndexVariable
+    ReDim Code\Expressions( IndexVariable + 1024 )
+  EndIf
+  Code\ExpressionCount + 1
+  
+  Define.Expression *Expression = @Code\Expressions( IndexVariable )
+  *Expression\Operator = Op
+  *Expression\Type = Tp
+  *Expression\FirstOperandI = Operand
+  *Expression\Region\LeftPos = StartPos
+  *Expression\Region\RightPos = *Parser\Position - *Parser\StartPosition
+  *Expression\NextExpression = -1
+  
+EndMacro
+
+Macro MakeExpressionOp2I( IndexVariable, Op, Tp, Operand1, Operand2, StartPos )
+  
+  Define.i IndexVariable = Code\ExpressionCount
+  If ArraySize( Code\Expressions() ) = IndexVariable
+    ReDim Code\Expressions( IndexVariable + 1024 )
+  EndIf
+  Code\ExpressionCount + 1
+  
+  Define.Expression *Expression = @Code\Expressions( IndexVariable )
+  *Expression\Operator = Op
+  *Expression\Type = Tp
+  *Expression\FirstOperandI = Operand1
+  *Expression\SecondOperandI = Operand2
+  *Expression\Region\LeftPos = StartPos
+  *Expression\Region\RightPos = *Parser\Position - *Parser\StartPosition
+  *Expression\NextExpression = -1
+  
+EndMacro
+
+Macro MakeStatement( IndexVariable, Kind, Reference, Scope = -1 )
+  
+  Define.i IndexVariable = Code\StatementCount
+  If ArraySize( Code\Statements() ) = IndexVariable
+    ReDim Code\Statements( IndexVariable + 1024 )
+  EndIf
+  Define.Statement *Statement = @Code\Statements( IndexVariable )
+  Code\StatementCount + 1
+  
+  *Statement\StatementKind = Kind
+  *Statement\ReferencedIndex = Reference
+  *Statement\InnerScope = Scope
+  *Statement\NextStatement = -1
+  
+  If *Parser\CurrentStatement <> -1
+    Code\Statements( *Parser\CurrentStatement )\NextStatement = IndexVariable
+  EndIf
+  *Parser\CurrentStatement = IndexVariable
+  
 EndMacro
 
 Procedure.c ToLower( Character.c )
@@ -574,6 +680,22 @@ Procedure SkipWhitespace( *Parser.Parser, AllowNewline.b = #True )
   
 EndProcedure
 
+Procedure.b NextCharIsListBegin( *Parser.Parser )
+  
+  SkipWhitespace( *Parser )
+  If *Parser\Position < *Parser\EndPosition
+    Define.c Char = PeekB( *Parser\Position ) 
+    If *Parser\CurrentContext = #ValueContext
+      ProcedureReturn Bool( Char = '(' )
+    Else
+      ProcedureReturn Bool( Char = '<' )
+    EndIf
+  EndIf
+  
+  ProcedureReturn #False
+  
+EndProcedure
+
 Procedure.i MatchToken( *Parser.Parser, Token.s, Length.i, AnyFollowing = #False )
   If *Parser\EndPosition - *Parser\Position < Length
     ProcedureReturn #False
@@ -601,7 +723,7 @@ Procedure ExpectSymbol( *Parser.Parser, Symbol.s, Length.i )
   SkipWhitespace( *Parser )
   If Not MatchToken( *Parser, Symbol, Length, #True )
     ;;;;TODO: diagnose
-    Debug "Expecting " + Symbol
+    Debug "Expecting " + Symbol + " but got " + Chr( PeekB( *Parser\Position ) )
   EndIf
 EndProcedure
 
@@ -781,12 +903,16 @@ Procedure.i ParseAnnotation( *Parser.Parser )
   
 EndProcedure
 
-Procedure.i ParseExpression( *Parser.Parser )
+; Expression parsing is recursive.
+Declare.i ParseExpression( *Parser.Parser )
+
+Procedure.i ParseBasicExpression( *Parser.Parser )
   
   SkipWhitespace( *Parser )
   If *Parser\Position = *Parser\EndPosition
     ProcedureReturn -1
   EndIf
+  
   Define.i LeftPos = *Parser\Position - *Parser\StartPosition
   
   Define.i Operator = -1
@@ -824,28 +950,123 @@ Procedure.i ParseExpression( *Parser.Parser )
   ElseIf IsAlpha( Char ) Or Char = '_'
     
     Operator = #NameExpression
-    FirstOperandI = ParseIdentifier( *Parser )        
+    FirstOperandI = ParseIdentifier( *Parser )
     
+  ElseIf Char = '('
+    
+    ; Either a simple parenthesized expression or a tuple expression.
+    ; Depends on the number of elements.
+    
+    *Parser\Position + 1
+    
+    Define.i FirstExpression = ParseExpression( *Parser )
+    If FirstExpression = -1
+      ;;;;TODO: diagnose
+      Debug "Expecting expression!"
+    EndIf
+    
+    SkipWhitespace( *Parser )
+    If *Parser\Position >= *Parser\EndPosition Or PeekB( *Parser\Position ) <> ','
+      ; It's a simple parenthesized expression. The parenthesis simply
+      ; disappear in our internal representation.
+      ExpectSymbol( *Parser, ")", 1 )
+      ProcedureReturn FirstExpression
+    EndIf
+    
+    Define.i LastExpression = FirstExpression
+    
+    While *Parser\Position < *Parser\EndPosition
+      
+      SkipWhitespace( *Parser )
+      If MatchToken( *Parser, ")", 1, #True )
+        Break
+      ElseIf Not MatchToken( *Parser, ",", 1, #True )
+        ;;;;TODO: diagnose
+        Debug "Expecting ','!!"
+      EndIf
+      
+      Define.i Expression = ParseExpression( *Parser )
+      If Expression = -1
+        Break
+      EndIf
+      
+      Code\Expressions( LastExpression )\NextExpression = Expression
+      LastExpression = Expression
+      
+    Wend
+    
+    Operator = #TupleExpression
+    FirstOperandI = FirstExpression
+  
   Else
     ProcedureReturn -1
   EndIf
   
-  Define.i ExpressionIndex = Code\ExpressionCount
-  If ArraySize( Code\Expressions() ) = ExpressionIndex
-    ReDim Code\Expressions( ExpressionIndex + 1024 )
-  EndIf
-  Code\ExpressionCount + 1
+  MakeExpressionOpI( Expression, Operator, Type, FirstOperandI, LeftPos )
   
-  Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
-  *Expression\Operator = Operator
-  *Expression\Type = Type
-  *Expression\FirstOperandI = FirstOperandI
-  *Expression\Region\LeftPos = LeftPos
-  *Expression\Region\RightPos = *Parser\Position - *Parser\StartPosition
-  
-  ProcedureReturn ExpressionIndex
+  ProcedureReturn Expression
   
 EndProcedure
+
+Procedure.i ParseUnaryPostfixExpression( *Parser.Parser )
+  
+  ;;;;TODO: first one needs to be allowed to be a full expression
+  Define.i FirstExpression = ParseBasicExpression( *Parser )
+  If FirstExpression = -1
+    ProcedureReturn -1
+  EndIf
+  
+  ; ATM we allow only parenthesized and tuple expressions to form apply expressions.
+  ; With a more powerful parser, that could be changed but there's a lot of ambiguity
+  ; that needs to be figured out on that path.
+  If NextCharIsListBegin( *Parser )
+      
+    Define.i SecondExpression = ParseBasicExpression( *Parser )
+    If SecondExpression <> -1
+      MakeExpressionOp2I( ApplyExpr, #ApplyExpression, -1, FirstExpression, SecondExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
+      ProcedureReturn ApplyExpr
+    EndIf
+    
+  EndIf
+  
+  ProcedureReturn FirstExpression
+  
+EndProcedure
+
+Procedure.i ParseUnaryPrefixExpression( *Parser.Parser )
+  
+  SkipWhitespace( *Parser )
+  
+  Define.i LeftPos = *Parser\Position - *Parser\StartPosition
+  Define.i PrefixOperator = -1
+  If MatchToken( *Parser, "!", 1, #True )
+    PrefixOperator = #LogicalNotExpression
+  EndIf
+  
+  Define.i Expression = ParseUnaryPostfixExpression( *Parser )
+  
+  If PrefixOperator <> -1
+    MakeExpressionOpI( UnaryExpression, PrefixOperator, -1, Expression, LeftPos )
+    Expression = UnaryExpression
+  EndIf
+  
+  ProcedureReturn Expression
+  
+EndProcedure
+
+Procedure.i ParseBinaryExpression( *Parser.Parser )
+  Define.i Left = ParseUnaryPrefixExpression( *Parser )
+  ;;;;TODO
+  ProcedureReturn Left
+EndProcedure
+
+Procedure.i ParseExpression( *Parser.Parser )
+  ProcedureReturn ParseBinaryExpression( *Parser )
+EndProcedure
+
+; Statements may themselves open scope (e.g. if statement) and thus
+; lead to recursion.
+Declare.i ParseStatementList( *Parser.Parser, Definition.i = -1 )
 
 Procedure.i ParseStatement( *Parser.Parser )
   
@@ -853,8 +1074,22 @@ Procedure.i ParseStatement( *Parser.Parser )
   
   Define.i Statement = -1
   Define.i ReferencedIndex = -1
+  Define.i InnerScope = -1
   
-  If MatchToken( *Parser, "return", 6 )
+  If MatchToken( *Parser, "if", 2 )
+    
+    Statement = #IfStatement
+    ReferencedIndex = ParseExpression( *Parser )
+    InnerScope = ParseStatementList( *Parser )
+    
+    CompilerIf #False
+    SkipWhitespace( *Parser )
+    If MatchToken( *Parser, "elseif", 6 )
+    ElseIf MatchToken( *Parser, "else", 4 )
+    EndIf
+    CompilerEndIf
+    
+  ElseIf MatchToken( *Parser, "return", 6 )
     
     SkipWhitespace( *Parser )
     If Not MatchToken( *Parser, ";", 1, #True )
@@ -870,23 +1105,56 @@ Procedure.i ParseStatement( *Parser.Parser )
     ProcedureReturn -1
   EndIf
   
-  Define.i StatementIndex = Code\StatementCount
-  If ArraySize( Code\Statements() ) = StatementIndex
-    ReDim Code\Statements( StatementIndex + 512 )
-  EndIf
-  Define.Statement *Statement = @Code\Statements( StatementIndex )
-  Code\StatementCount + 1
-  
-  *Statement\StatementKind = Statement
-  *Statement\ReferencedIndex = ReferencedIndex
-  *Statement\NextStatement = -1
-  
-  If *Parser\CurrentStatement <> -1
-    Code\Statements( *Parser\CurrentStatement )\NextStatement = StatementIndex
-  EndIf
-  *Parser\CurrentStatement = StatementIndex
+  MakeStatement( StatementIndex, Statement, ReferencedIndex, InnerScope )
   
   ProcedureReturn StatementIndex
+  
+EndProcedure
+
+; Opens a new scope and parses a list of statements into it.
+; Returns the index of the scope.
+Procedure.i ParseStatementList( *Parser.Parser, Definition.i = -1 )
+  
+  PushScope( *Parser )
+  Define.i Scope = CurrentScope
+  Code\Scopes( CurrentScope )\Definition = Definition
+    
+  Define.i FirstStatement = -1
+  Define.i LastStatement = -1
+  
+  While *Parser\Position < *Parser\EndPosition
+    
+    SkipWhitespace( *Parser )
+    If MatchToken( *Parser, "end", 3 )
+      Break
+    EndIf
+    
+    Define.i Statement = ParseStatement( *Parser )
+    If Statement = -1
+      Break
+    EndIf
+    
+    If FirstStatement = -1
+      FirstStatement = Statement
+      ; The list of statements is linked through the scope.
+      Code\Scopes( CurrentScope )\FirstDefinitionOrStatement = Statement      
+    Else
+      Code\Statements( LastStatement )\NextStatement = Statement
+    EndIf
+    
+    ; Statement may be a sequence (e.g. if-else). Iterate to last one.
+    While Code\Statements( Statement )\NextStatement <> -1
+      Statement = Code\Statements( Statement )\NextStatement
+    Wend
+    
+    LastStatement = Statement
+    
+  Wend
+  
+  PopScope( *Parser )
+  ExpectSymbol( *Parser, ";", 1 )
+  
+  ProcedureReturn Scope
   
 EndProcedure
 
@@ -1067,40 +1335,7 @@ Procedure.i ParseDefinition( *Parser.Parser )
   ; Parse body.
   SkipWhitespace( *Parser )
   If Not MatchToken( *Parser, ";", 1, #True )
-    
-    PushScope( *Parser )
-    *Definition\InnerScope = CurrentScope
-    Code\Scopes( CurrentScope )\Definition = DefinitionIndex
-    
-    Define.i FirstStatement = -1
-    Define.i LastStatement = -1
-    
-    While *Parser\Position < *Parser\EndPosition
-      
-      SkipWhitespace( *Parser )
-      If MatchToken( *Parser, "end", 3 )
-        Break
-      EndIf
-      
-      Define.i Statement = ParseStatement( *Parser )
-      If Statement = -1
-        Break
-      EndIf
-      
-      If FirstStatement = -1
-        FirstStatement = Statement
-        Code\Scopes( CurrentScope )\FirstDefinitionOrStatement = Statement
-      Else
-        Code\Statements( LastStatement )\NextStatement = Statement
-      EndIf
-      
-      LastStatement = Statement
-      
-    Wend
-    
-    PopScope( *Parser )
-    ExpectSymbol( *Parser, ";", 1 )
-    
+    *Definition\InnerScope = ParseStatementList( *Parser, DefinitionIndex )
   EndIf
   
   ProcedureReturn DefinitionIndex
@@ -1119,6 +1354,7 @@ Procedure ParseText()
   Parser\CurrentStatement = -1
   Parser\CurrentLine = 1
   Parser\CurrentColumn = 1
+  Parser\CurrentContext = #ValueContext
   
   While Parser\Position < Parser\EndPosition
     If ParseDefinition( @Parser ) = -1
@@ -1146,6 +1382,7 @@ Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
   Parser\CurrentStatement = -1
   Parser\CurrentLine = 1
   Parser\CurrentColumn = 1
+  Parser\CurrentContext = #ValueContext
   Assert( Fn( @Parser ) = Expected )
   FreeMemory( *Buffer )
 EndProcedure
@@ -1200,7 +1437,130 @@ ProcedureUnit CanParseNameExpression()
   ;;;;TODO: check type
   Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
 EndProcedureUnit
+
+ProcedureUnit CanParseParenthesizedExpression()
+  ResetCode()
+  ; This is *not* a tuple expression. Need at least two elements.
+  TestParseText( @ParseExpression(), "( a )", 0 )
+  Assert( Code\ExpressionCount = 1 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = -1 )
+EndProcedureUnit
+
+ProcedureUnit CanParseTupleExpression()
+  ResetCode()
+  TestParseText( @ParseExpression(), "( a, b, c )", 3 )
+  Assert( Code\ExpressionCount = 4 )
+  Assert( Code\IdentifierCount = 3 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Identifiers( 1 ) = "b" )
+  Assert( Code\Identifiers( 2 ) = "c" )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = 1 )
+  Assert( Code\Expressions( 1 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 1 )\NextExpression = 2 )
+  Assert( Code\Expressions( 2 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 2 )
+  Assert( Code\Expressions( 2 )\NextExpression = -1 )
+  Assert( Code\Expressions( 3 )\Operator = #TupleExpression )
+  Assert( Code\Expressions( 3 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 3 )\NextExpression = -1 )
+EndProcedureUnit
+
+ProcedureUnit CanParseApplyExpression()
+  ResetCode()
+  ; One expression followed by another without an operator in-between is an application.
+  ; NOTE: ATM, parenthesis are needed.
+  TestParseText( @ParseExpression(), "a( b )", 2 )
+  Assert( Code\ExpressionCount = 3 )
+  Assert( Code\IdentifierCount = 2 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Identifiers( 1 ) = "b" )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = -1 ) ; These are not linked.
+  Assert( Code\Expressions( 1 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 1 )\NextExpression = -1 )
+  Assert( Code\Expressions( 2 )\Operator = #ApplyExpression )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 2 )\SecondOperandI = 1 )
+  Assert( Code\Expressions( 2 )\NextExpression = -1 )
+EndProcedureUnit
   
+ProcedureUnit CanParseIfStatementWithoutElse()
+  ResetCode()
+  TestParseText( @ParseStatement(), "if ( a ) return 123; end;", 1 )
+  Assert( Code\StatementCount = 2 )
+  Assert( Code\ExpressionCount = 2 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\ScopeCount = 2 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Scopes( 1 )\Definition = -1 )
+  Assert( Code\Scopes( 1 )\Parent = 0 )
+  Assert( Code\Scopes( 1 )\FirstDefinitionOrStatement = 0 )
+  Assert( Code\Statements( 0 )\StatementKind = #ReturnStatement )
+  Assert( Code\Statements( 0 )\ReferencedIndex = 1 )
+  Assert( Code\Statements( 0 )\NextStatement = -1 )
+  Assert( Code\Statements( 0 )\InnerScope = -1 )
+  Assert( Code\Statements( 1 )\StatementKind = #IfStatement )
+  Assert( Code\Statements( 1 )\ReferencedIndex = 0 )
+  Assert( Code\Statements( 1 )\NextStatement = -1 )
+  Assert( Code\Statements( 1 )\InnerScope = 1 )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = -1 )
+  Assert( Code\Expressions( 1 )\Operator = #LiteralExpression )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 123 )
+  Assert( Code\Expressions( 1 )\NextExpression = -1 )
+EndProcedureUnit  
+
+ProcedureUnit CanParseIfStatementWithElse()
+  ResetCode()
+  TestParseText( @ParseStatement(), "if ( a ) return 123; else return 321; end;", 1 )
+  Assert( Code\ScopeCount = 3 )
+  Assert( Code\StatementCount = 4 )
+  Assert( Code\ExpressionCount = 3 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Scopes( 1 )\Parent = 0 )
+  Assert( Code\Scopes( 1 )\FirstDefinitionOrStatement = 0 )
+  Assert( Code\Scopes( 1 )\Definition = -1 )
+  Assert( Code\Scopes( 2 )\Parent = 0 )
+  Assert( Code\Scopes( 2 )\FirstDefinitionOrStatement = 2 )
+  Assert( Code\Scopes( 2 )\Definition = -1 )
+  Assert( Code\Statements( 0 )\StatementKind = #ReturnStatement )
+  Assert( Code\Statements( 0 )\ReferencedIndex = 1 )
+  Assert( Code\Statements( 0 )\NextStatement = -1 )
+  Assert( Code\Statements( 0 )\InnerScope = -1 )
+  Assert( Code\Statements( 1 )\StatementKind = #IfStatement )
+  Assert( Code\Statements( 1 )\ReferencedIndex = 0 )
+  Assert( Code\Statements( 1 )\NextStatement = 3 )
+  Assert( Code\Statements( 1 )\InnerScope = 1 )
+  Assert( Code\Statements( 2 )\StatementKind = #ReturnStatement )
+  Assert( Code\Statements( 2 )\ReferencedIndex = 2 )
+  Assert( Code\Statements( 2 )\NextStatement = -1 )
+  Assert( Code\Statements( 2 )\InnerScope = -1 )
+  Assert( Code\Statements( 3 )\StatementKind = #ElseStatement )
+  Assert( Code\Statements( 3 )\ReferencedIndex = -1 )
+  Assert( Code\Statements( 3 )\NextStatement = -1 )
+  Assert( Code\Statements( 3 )\InnerScope = 2 )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = -1 )
+  Assert( Code\Expressions( 1 )\Operator = #LiteralExpression )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 123 )
+  Assert( Code\Expressions( 1 )\NextExpression = -1 )
+  Assert( Code\Expressions( 2 )\Operator = #LiteralExpression )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 321 )
+  Assert( Code\Expressions( 2 )\NextExpression = -1 )
+EndProcedureUnit  
+
 ProcedureUnit CanParseAnnotation()
   ResetCode()
   TestParseText( @ParseAnnotation(), "|DESCRIPTION Foo", 0 )
@@ -1374,6 +1734,7 @@ Procedure GenerateDocs()
   ;;;;TODO: sort alphabetically
   ;;;;TODO: put types in inheritance hierarchy (okay if a type is mentioned more than once; or introduce groups for stuff like "A & B"?)
   ;;;;TODO: also have a tab for assets; in fact, the browser should basically be a browsable HTML version of the project
+  ;;;;TODO: also have a tab for tests? or display the results inline as blobs on the test methods? but maybe both with the former for details?
   
   ; Populate TOC.
   Define.i TOCFile = OpenFile( #PB_Any, GeneratedDocsPath + "\toc.html" )
@@ -1962,6 +2323,7 @@ EndIf
 ;[ ] Can run tests from code in player
 ;[ ] Syntax highlighting in text editor
 ;[ ] Auto-completion in text editor
+;[ ] Make parser predictive and the syntax more liberal
 
 ; ....
 
@@ -1987,7 +2349,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 1131
-; FirstLine = 1110
-; Folding = --------
+; CursorPosition = 1089
+; FirstLine = 1058
+; Folding = ----------
 ; EnableXP

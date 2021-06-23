@@ -14,5 +14,8 @@ TYPE Next;
 TYPE Fourth;
 
 METHOD MyMethod() : INTEGER
+    IF True
+        Return 2344;
+    END;
     RETURN 1234;
 END;
