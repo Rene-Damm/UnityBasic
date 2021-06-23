@@ -22,13 +22,48 @@ public static class EditorTooling
         while (!exit)
         {
             var message = await Receive();
+            var split = message.Split('\0');
+            foreach (var entry in split)
+                if (!ProcessMessage(entry))
+                {
+                    exit = true;
+                    break;
+                }
+        }
+        
+        EditorApplication.Exit(0);
+    }
+
+    private static bool ProcessMessage(string message)
+    {
+        if (message.StartsWith("set:"))
+        {
+            var equalsPos = message.IndexOf('=');
+            var setting = message.Substring("set:".Length, equalsPos - "set:".Length);
+            var value = message.Substring(equalsPos + 1);
+
+            switch (setting)
+            {
+                case "companyName":
+                    Debug.Log("<<<<<<<<<<<<<< Setting companyName: " + value);
+                    PlayerSettings.companyName = value;
+                    break;
+                
+                case "productName":
+                    Debug.Log("<<<<<<<<<<<<<< Setting productName: " + value);
+                    PlayerSettings.productName = value;
+                    break;
+            }
+        }
+        else
+        {
             switch (message)
             {
                 case "exit":
-                    exit = true;
-                    break;
+                    return false;
                 
                 case "build":
+                    Debug.Log("<<<<<<<<<<<<<< Initiating build");
                     // Building directly from here results in "PlayerLoop internal function has been
                     // called recursively error" so put the call on the editor update loop instead.
                     EditorApplication.delayCall += () =>
@@ -41,8 +76,8 @@ public static class EditorTooling
                     break;
             }
         }
-        
-        EditorApplication.Exit(0);
+
+        return true;
     }
 
     private static async void Send(string message)
@@ -64,7 +99,7 @@ public static class EditorTooling
 
     private static bool BuildPlayer()
     {
-        ////TODO: set company and product name from data transmitted by IDE
+        PlayerSettings.usePlayerLog = true;
         
         var options = new BuildPlayerOptions
         {

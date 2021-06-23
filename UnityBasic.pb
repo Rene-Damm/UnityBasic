@@ -1,7 +1,8 @@
 
 EnableExplicit
 
-XIncludeFile "GoScintilla/GoScintilla.pbi"
+IncludePath "GoScintilla/"
+XIncludeFile "GoScintilla.pbi"
 
 Global.s UnityEditorExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
 Global.s UnityPlayerExecutablePath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject\Builds\UnityBasic64.exe"
@@ -42,7 +43,7 @@ AddStatusBarField( WindowWidth * 0.25 )
 Define.i ContentWidth = WindowWidth
 Define.i ContentHeight = WindowHeight - StatusBarHeight( StatusBar )
 
-Global.i Scintilla = ScintillaGadget( #PB_Any, 0, 0, ContentWidth / 2, ContentHeight, 0 )
+Global.i Scintilla = GOSCI_Create( #PB_Any, 0, 0, ContentWidth / 2, ContentHeight, 0, #GOSCI_AUTOSIZELINENUMBERSMARGIN )
 ;;;;TODO: use navigation callback or popup blocker to navigate from docs to code (put links in generated doc)
 Global.i DocViewer = WebGadget( #PB_Any, ContentWidth / 2, 0, ContentWidth / 2, ContentHeight / 2, "file:///" + ReplaceString( GeneratedDocsPath, "\", "/" ) + "/index.html" )
 Global.i PlayerContainer = ContainerGadget( #PB_Any, ContentWidth / 2, ContentHeight / 2, ContentWidth / 2 , ContentHeight / 2 )
@@ -74,10 +75,31 @@ ReadData( TextFile, *Text, TextLength )
 PokeB( *Text + TextLength, 0 )
 ScintillaSendMessage( Scintilla, #SCI_SETTEXT, 0, *Text )
 ScintillaSendMessage( Scintilla, #SCI_SETREADONLY, 0 )
-Define *Font = UTF8( "Consolas" )
-ScintillaSendMessage( Scintilla, #SCI_STYLESETFONT, #STYLE_DEFAULT, *Font )
-ScintillaSendMessage( Scintilla, #SCI_STYLESETSIZE, #STYLE_DEFAULT, 16 )
-FreeMemory( *Font )
+
+GOSCI_SetAttribute( Scintilla, #GOSCI_LINENUMBERAUTOSIZEPADDING, 10 )
+GOSCI_SetMarginWidth( Scintilla, #GOSCI_MARGINFOLDINGSYMBOLS, 24 )
+GOSCI_SetColor( Scintilla, #GOSCI_CARETLINEBACKCOLOR, $B4FFFF )
+GOSCI_SetFont( Scintilla, "Consolas", 16 )
+GOSCI_SetTabs( Scintilla, 4, 1 )
+
+Enumeration Styles
+  #StyleKeyword = 1
+  #StyleComment
+  #StyleString
+  #StyleNumber
+  #StyleFunction
+  #StyleType
+  #StyleAnnotation
+EndEnumeration
+
+GOSCI_SetStyleFont( Scintilla, #StyleKeyword, "", -1, #PB_Font_Bold )
+GOSCI_SetStyleColors( Scintilla, #StyleKeyword, $800000 )
+
+GOSCI_SetStyleFont( Scintilla, #StyleAnnotation, "", -1, #PB_Font_Italic )
+GOSCI_SetStyleColors( Scintilla, #StyleAnnotation, $006400 )
+      
+GOSCI_AddKeywords( Scintilla, "TYPE", #StyleKeyword )
+GOSCI_AddKeywords( Scintilla, "#DESCRIPTION #DETAILS", #StyleAnnotation )
 
 SetActiveGadget( Scintilla )
 
@@ -95,6 +117,11 @@ Enumeration Status
   #BadState ; States we can't yet recover from.
 EndEnumeration
 
+Structure UnityProjectSettings
+  ProductName.s
+  CompanyName.s
+EndStructure
+
 Global.i UnityEditor = RunProgram( UnityEditorExecutablePath, ~"-batchmode -projectPath \"" + GeneratedProjectPath + ~"\" -executeMethod EditorTooling.Run", "", #PB_Program_Open | #PB_Program_Read )
 Global.i UnityPlayer
 Global.i UnityEditorClient
@@ -103,21 +130,23 @@ Global.i UnityStatus = #WaitingForEditorToConnect
 Global *UnityNetworkBuffer = AllocateMemory( #MAX_MESSAGE_LENGTH )
 Global *UnityNetworkBufferPos
 Global.i UnityBatchSendClient
+Global.UnityProjectSettings UnityProjectSettings
 
 ; Sends some text to a Unity subprocess.
 Procedure SendString( Client.i, String.s )
     
   Define.i Length = StringByteLength( String, #PB_UTF8 )
-  Define *Buffer = AllocateMemory( Length )
+  Define *Buffer = AllocateMemory( Length + 1 )
   
-  PokeS( *Buffer, String, Length, #PB_UTF8 | #PB_String_NoZero )
+  PokeS( *Buffer, String, Length, #PB_UTF8 )
   
-  SendNetworkData( Client, *Buffer, Length )
+  SendNetworkData( Client, *Buffer, Length + 1 )
   
   FreeMemory( *Buffer )
   
 EndProcedure
 
+;;;;REVIEW: seems like we may not even need this and PB is doing this under the hood for us
 Procedure StartBatchSend( Client.i )
   *UnityNetworkBufferPos = *UnityNetworkBuffer
   UnityBatchSendClient = Client
@@ -822,6 +851,25 @@ ProcedureUnit CanParseTypeDefinitionWithAnnotation()
   Assert( Code\Annotations( 1 )\AnnotationText = "Foo" )
   Assert( Code\Annotations( 1 )\NextAnnotation = -1 )
 EndProcedureUnit
+  
+ProcedureUnit CanParseSimpleProgram()
+  ResetCode()
+  TestParseText( @ParseDefinition(), ~"#PRODUCT MyProduct\n#COMPANY MyCompany\nprogram First;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\Type = #ProgramDefinition )
+  Assert( Code\Definitions( 0 )\Flags = 0 )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = 0 )
+  Assert( Code\AnnotationCount = 2 )
+  Assert( Code\Annotations( 0 )\AnnotationKind = #ProductAnnotation )
+  Assert( Code\Annotations( 0 )\AnnotationText = "MyProduct" )
+  Assert( Code\Annotations( 0 )\NextAnnotation = 1 )
+  Assert( Code\Annotations( 1 )\AnnotationKind = #CompanyAnnotation )
+  Assert( Code\Annotations( 1 )\AnnotationText = "MyCompany" )
+  Assert( Code\Annotations( 1 )\NextAnnotation = -1 )
+EndProcedureUnit
 
 ;==============================================================================
 ; Documentation.
@@ -829,6 +877,8 @@ EndProcedureUnit
 ;;;;TODO: support docs for language elements (just have manual tab with handwritten content?)
 
 Procedure GenerateDocs()
+  
+  ;;no... instead, host a simple webserver that dynamically generates content and have the doc viewer go there
   
   Define.s TypesFolder = GeneratedDocsPath + "\Types"
   Define.s FunctionsFolder = GeneratedDocsPath + "\Functions"
@@ -986,6 +1036,9 @@ Structure Object
 EndStructure
 
 Structure Program
+  Name.s
+  Company.s
+  Product.s
   AssetCount.i
   FunctionCount.i
   TypeCount.i
@@ -1041,6 +1094,25 @@ Procedure Collect( Map Types.GenType(), Map Fields.GenField(), Map Functions.Gen
         
         Define *GenType.GenType = AddMapElement( Types(), Name )
         
+      Case #ProgramDefinition
+        
+        ;;;;TODO: for now, ensure there is only one of these
+        
+        Program\Name = Code\Identifiers( *Definition\Name )
+        
+        Define.i AnnotationIndex = *Definition\FirstAnnotation
+        While AnnotationIndex <> -1
+          Define.Annotation *Annotation = @Code\Annotations( AnnotationIndex )
+          Select *Annotation\AnnotationKind
+            Case #ProductAnnotation
+              Program\Product = *Annotation\AnnotationText
+              
+            Case #CompanyAnnotation
+              Program\Company = *Annotation\AnnotationText
+          EndSelect
+          AnnotationIndex = *Annotation\NextAnnotation
+        Wend
+        
     EndSelect
     
   Next
@@ -1081,6 +1153,9 @@ EndProcedure
 Procedure TranslateProgram()
   
   ResetStructure( @Program, Program )
+  
+  Program\Product = "DefaultProduct"
+  Program\Company = "DefaultCompany"
   
   NewMap Types.GenType()
   NewMap Fields.GenField()
@@ -1130,6 +1205,26 @@ Procedure SendProgram()
   
 EndProcedure
 
+Procedure SendProjectSettings()
+  
+  If UnityEditorClient = 0
+    ProcedureReturn
+  EndIf
+  
+  ;;;;TODO: relay name and change name of output executable accordingly
+  
+  If UnityProjectSettings\ProductName <> Program\Product
+    SendString( UnityEditorClient, "set:productName=" + Program\Product )
+    UnityProjectSettings\ProductName = Program\Product
+  EndIf
+  
+  If UnityProjectSettings\CompanyName <> Program\Company
+    SendString( UnityEditorClient, "set:companyName=" + Program\Company )
+    UnityProjectSettings\CompanyName = Program\Company
+  EndIf
+  
+EndProcedure
+
 Procedure UpdateProgram()
   ParseText()
   ;;;;TODO: update annotations
@@ -1137,6 +1232,7 @@ Procedure UpdateProgram()
     ProcedureReturn
   EndIf
   TranslateProgram()
+  SendProjectSettings()
   If Code\ErrorCount > 0
     ProcedureReturn
   EndIf
@@ -1210,6 +1306,7 @@ Repeat
                 Case #WaitingForEditorToConnect
                   UnityEditorClient = EventClient()
                   Status( "Waiting for Unity editor to build player..." )
+                  SendProjectSettings()
                   SendString( UnityEditorClient, "build" )
                   UnityStatus = #WaitingForEditorToBuildPlayer
                   
@@ -1265,6 +1362,7 @@ Until Event = #PB_Event_CloseWindow
 
 Status( "Exiting." )
 FlushText( #False )
+GOSCI_Free( Scintilla )
 ;;;;TODO: shut down Unity more elegantly...
 If UnityEditor <> 0
   KillProgram( UnityEditor )
@@ -1285,14 +1383,16 @@ EndIf
 ;[X] Unity player window is embedded into IDE window
 ;[X] Program is generated
 ;[X] Unity player connects to IDE
-;[ ] Program is transferred to player
+;[X] Program is transferred To player
+;[ ] Can add functions
+;[ ] Can add simple statements
 ;[ ] Program is being run
-;[ ] Program is migrated from one run to the next
 ;[ ] Can add asset to project
 ;[ ] Assets are being built and rebuilt into asset bundles
 ;[ ] Player can load asset bundles
 ;[ ] Can add&render display element (sprite or model)
 ;[ ] Can animate display element in code
+;[ ] Program is migrated from one run to the next
 
 ; ....
 
@@ -1303,6 +1403,8 @@ EndIf
 ;[ ] Can run tests from code in player
 ;[ ] Syntax highlighting in text editor
 ;[ ] Auto-completion in text editor
+
+; ....
 
 ;[ ] Vim mode
 
@@ -1318,7 +1420,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 3
-; FirstLine = 2
+; CursorPosition = 1385
+; FirstLine = 1366
 ; Folding = ------
 ; EnableXP

@@ -1,4 +1,8 @@
 
+#PRODUCT MyProduct
+#COMPANY MyCompany
+PROGRAM FirstProgram;
+
 TYPE FirstType;
 
 TYPE OtherType;
