@@ -4,12 +4,14 @@ EnableExplicit
 IncludePath "GoScintilla/"
 XIncludeFile "GoScintilla.pbi"
 
+#SOURCE_FILE_EXTENSION = ".ubasic"
+
 Global.s UnityEditorExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
 Global.s UnityPlayerExecutablePath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject\Builds\UnityBasic64.exe"
 Global.s GeneratedProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
 Global.s GeneratedDocsPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Docs"
 Global.s SourceProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
-Global.s TextFilePath = SourceProjectPath + "\TestFile.code"
+Global.s TextFilePath = SourceProjectPath + "\TestFile" + #SOURCE_FILE_EXTENSION
 
 #SPACE = 32
 #NEWLINE = 10
@@ -256,11 +258,15 @@ Enumeration Operator
 EndEnumeration
 
 ; Type and value expressions use the same data format.
+; All expressions are either unary or binary.
 Structure Expression
   Operator.i
   Type.i
   Region.TextRegion
-  FirstOperand.i
+  StructureUnion
+    FirstOperandI.i
+    FirstOperandD.d
+  EndStructureUnion
   SecondOperand.i
 EndStructure
 
@@ -281,7 +287,7 @@ Structure Statement
   NextStatement.i
 EndStructure
 
-Enumeration DefinitionType
+Enumeration DefinitionKind
   #TypeDefinition
   #MethodDefinition
   #FieldDefinition
@@ -314,8 +320,9 @@ EndStructure
 Structure Definition
   Name.i
   Scope.i
-  Type.i
+  DefinitionKind.i
   Flags.i
+  Type.i
   InnerScope.i
   Region.TextRegion
   NextDefinition.i
@@ -351,6 +358,7 @@ Structure Code
   ErrorCount.i
   WarningCount.i
   Map IdentifierTable.i()
+  Map StringLiterals.i()
   Array Identifiers.s( 0 )
   Array Scopes.Scope( 1 ) ; First one is always the global scope
   Array Definitions.Definition( 0 )
@@ -378,6 +386,11 @@ EndProcedure
 ; Parser.
 ;;;;TODO: put this on a thread
 
+Enumeration ParserContext
+  #ValueContext
+  #TypeContext
+EndEnumeration
+
 Structure Parser
   *Position
   *EndPosition
@@ -390,6 +403,7 @@ Structure Parser
   CurrentScope.i
   CurrentDefinitionInScope.i
   CurrentStatement.i
+  CurrentContext.i
   ;store failure state here; func to reset
 EndStructure
 
@@ -449,12 +463,19 @@ Procedure.i IsAlpha( Character.c )
   ProcedureReturn #False
 EndProcedure
 
-Procedure.i IsAlphanumeric( Character.c )
+Procedure.i IsDigit( Character.c )
   ;;;;FIXME: Not Unicode...
   If Character >= 48 And Character <= 57
     ProcedureReturn #True
   EndIf
-  ProcedureReturn IsAlpha( Character )
+  ProcedureReturn #False
+EndProcedure
+
+Procedure.i IsAlphanumeric( Character.c )
+  If IsAlpha( Character ) Or IsDigit( Character )
+    ProcedureReturn #True
+  EndIf
+  ProcedureReturn #False
 EndProcedure
 
 Procedure SkipWhitespace( *Parser.Parser, AllowNewline.b = #True )
@@ -531,12 +552,10 @@ Procedure.i ParseModifier( *Parser.Parser )
   ProcedureReturn 0
 EndProcedure
 
-Procedure.i ParseIdentifier( *Parser.Parser )
-  
-  SkipWhitespace( *Parser )
-  
-  ;;;;TODO: escaped identifiers
-  ;;;;TODO: identifiers ending in !
+; Parses a name into NameBuffer and canonicalizes it.
+; Returns length of name on success. Updates LastRegion.
+; Returns -1 if there's no name at the current position.
+Procedure.i ReadName( *Parser.Parser )
   
   Define *StartPosition = *Parser\Position
   While *Parser\Position < *Parser\EndPosition
@@ -594,9 +613,25 @@ Procedure.i ParseIdentifier( *Parser.Parser )
   Wend
   PokeC( *Buffer + WriteIndex * SizeOf( Character ), #NUL )
   
+  ProcedureReturn WriteIndex
+  
+EndProcedure
+
+Procedure.i ParseIdentifier( *Parser.Parser )
+  
+  SkipWhitespace( *Parser )
+  
+  ;;;;TODO: escaped identifiers
+  ;;;;TODO: identifiers ending in !
+  
+  Define.i Length = ReadName( *Parser )
+  If Length = -1
+    ProcedureReturn -1
+  EndIf
+  
   Define *Element = FindMapElement( Code\IdentifierTable(), *Parser\NameBuffer )
   If *Element = #Null
-    Define.s Name = Left( *Parser\NameBuffer, WriteIndex )
+    Define.s Name = Left( *Parser\NameBuffer, Length )
     If ArraySize( Code\Identifiers() ) = Code\IdentifierCount
       ReDim Code\Identifiers.s( Code\IdentifierCount + 512 )
     EndIf
@@ -664,6 +699,72 @@ Procedure.i ParseAnnotation( *Parser.Parser )
   
 EndProcedure
 
+Procedure.i ParseExpression( *Parser.Parser )
+  
+  SkipWhitespace( *Parser )
+  If *Parser\Position = *Parser\EndPosition
+    ProcedureReturn -1
+  EndIf
+  Define.i LeftPos = *Parser\Position - *Parser\StartPosition
+  
+  Define.i Operator = -1
+  Define.i Type = -1
+  Define.i FirstOperandI
+  
+  Define.c Char = PeekB( *Parser\Position )
+  If IsDigit( Char )
+    
+    Operator = #LiteralExpression
+    
+    ;;;;TODO: support hex literals
+    
+    ; Numbers.
+    
+    Define.i IntegerPart = Char - 48
+    *Parser\Position + 1
+    
+    ; Advance to next non-digit.
+    While *Parser\Position < *Parser\EndPosition
+      Char = PeekB( *Parser\Position )
+      If Not IsDigit( Char )
+        Break
+      EndIf
+      IntegerPart * 10
+      IntegerPart + ( Char - 48 )
+      *Parser\Position + 1
+    Wend
+    
+    ;;;;TODO: float literals
+    ;;;;TODO: integer size suffixes
+    
+    FirstOperandI = IntegerPart
+    
+  ElseIf IsAlpha( Char ) Or Char = '_'
+    
+    Operator = #NameExpression
+    FirstOperandI = ParseIdentifier( *Parser )        
+    
+  Else
+    ProcedureReturn -1
+  EndIf
+  
+  Define.i ExpressionIndex = Code\ExpressionCount
+  If ArraySize( Code\Expressions() ) = ExpressionIndex
+    ReDim Code\Expressions( ExpressionIndex + 1024 )
+  EndIf
+  Code\ExpressionCount + 1
+  
+  Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
+  *Expression\Operator = Operator
+  *Expression\Type = Type
+  *Expression\FirstOperandI = FirstOperandI
+  *Expression\Region\LeftPos = LeftPos
+  *Expression\Region\RightPos = *Parser\Position - *Parser\StartPosition
+  
+  ProcedureReturn ExpressionIndex
+  
+EndProcedure
+
 Procedure.i ParseStatement( *Parser.Parser )
   
   SkipWhitespace( *Parser )
@@ -728,26 +829,26 @@ Procedure.i ParseDefinition( *Parser.Parser )
     Flags | Modifier
   Wend
   
-  ; Parse type.
-  Define.i Type = 0
+  ; Parse definition kind.
+  Define.i Kind = -1
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "type", 4 )
-    Type = #TypeDefinition
+    Kind = #TypeDefinition
   ElseIf MatchToken( *Parser, "object", 6 )
-    Type = #TypeDefinition
+    Kind = #TypeDefinition
     Flags | #IsSingleton
   ElseIf MatchToken( *Parser, "method", 6 )
-    Type = #MethodDefinition
+    Kind = #MethodDefinition
   ElseIf MatchToken( *Parser, "field", 5 )
-    Type = #FieldDefinition
+    Kind = #FieldDefinition
   ElseIf MatchToken( *Parser, "features", 8 )
-    Type = #FeatureDefinition
+    Kind = #FeatureDefinition
   ElseIf MatchToken( *Parser, "program", 7 )
-    Type = #ProgramDefinition
+    Kind = #ProgramDefinition
   ElseIf MatchToken( *Parser, "library", 7 )
-    Type = #LibraryDefinition
+    Kind = #LibraryDefinition
   ElseIf MatchToken( *Parser, "module", 6 )
-    Type = #ModuleDefinition
+    Kind = #ModuleDefinition
   Else
     ;;;;TODO
     ProcedureReturn -1
@@ -768,7 +869,7 @@ Procedure.i ParseDefinition( *Parser.Parser )
   Define *Definition.Definition = @Code\Definitions( DefinitionIndex )
   *Definition\Flags = Flags
   *Definition\Name = Name
-  *Definition\Type = Type
+  *Definition\DefinitionKind = Kind
   *Definition\NextDefinition = -1
   *Definition\InnerScope = -1
   *Definition\FirstAnnotation = FirstAnnotation
@@ -799,6 +900,14 @@ Procedure.i ParseDefinition( *Parser.Parser )
   If MatchToken( *Parser, "(", 1, #True )
     
     ExpectSymbol( *Parser, ")", 1 )
+  EndIf
+  
+  ; Parse type.
+  SkipWhitespace( *Parser )
+  If MatchToken( *Parser, ":", 1, #True )
+    
+    *Definition\Type = ParseExpression( *Parser )
+    
   EndIf
   
   ; Parse clauses.
@@ -832,6 +941,8 @@ EndProcedure
 Procedure ParseText()
   
   ResetCode()
+  
+  ;;;;TODO: preparse libraries and reset to the preparsed state here
   
   Define.Parser Parser
   Parser\Position = *Text
@@ -893,6 +1004,26 @@ ProcedureUnit CanParseIdentifier()
   Assert( FindMapElement( Code\IdentifierTable(), "foo_bar" ) <> #Null )
   Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foo_bar" ) ) = 0 )
 EndProcedureUnit
+
+ProcedureUnit CanParseLiteralExpression()
+  ResetCode()
+  TestParseText( @ParseExpression(), "01234", 0 )
+  Assert( Code\ExpressionCount = 1 )
+  Assert( Code\Expressions( 0 )\Operator = #LiteralExpression )
+  ;;;;TODO: check type
+  Assert( Code\Expressions( 0 )\FirstOperandI = 1234 )
+EndProcedureUnit
+
+ProcedureUnit CanParseNameExpression()
+  ResetCode()
+  TestParseText( @ParseExpression(), "test", 0 )
+  Assert( Code\ExpressionCount = 1 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "test" )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  ;;;;TODO: check type
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+EndProcedureUnit
   
 ProcedureUnit CanParseAnnotation()
   ResetCode()
@@ -909,11 +1040,30 @@ ProcedureUnit CanParseSimpleTypeDefinition()
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\Identifiers( 0 ) = "first" )
   Assert( Code\Definitions( 0 )\Name = 0 )
-  Assert( Code\Definitions( 0 )\Type = #TypeDefinition )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #TypeDefinition )
   Assert( Code\Definitions( 0 )\Flags = 0 )
   Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
   Assert( Code\Definitions( 0 )\FirstValueParameter = -1 )
   Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
+EndProcedureUnit
+
+ProcedureUnit CanParseDerivedTypeDefinition()
+  ResetCode()
+  TestParseText( @ParseDefinition(), "type First : Second;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 2 )
+  Assert( Code\ExpressionCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Identifiers( 1 ) = "second" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #TypeDefinition )
+  Assert( Code\Definitions( 0 )\Flags = 0 )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
+  Assert( Code\Definitions( 0 )\FirstValueParameter = -1 )
+  Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
+  Assert( Code\Definitions( 0 )\Type = 0 )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 1 )
 EndProcedureUnit
 
 ProcedureUnit CanParseEmptyMethodDefinition()
@@ -923,7 +1073,7 @@ ProcedureUnit CanParseEmptyMethodDefinition()
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\Identifiers( 0 ) = "first" )
   Assert( Code\Definitions( 0 )\Name = 0 )
-  Assert( Code\Definitions( 0 )\Type = #MethodDefinition )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #MethodDefinition )
   Assert( Code\Definitions( 0 )\Flags = 0 )
   Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
   Assert( Code\Definitions( 0 )\InnerScope = -1 )
@@ -940,7 +1090,7 @@ ProcedureUnit CanParseSimpleMethodDefinition()
   Assert( Code\StatementCount = 1 )
   Assert( Code\Identifiers( 0 ) = "first" )
   Assert( Code\Definitions( 0 )\Name = 0 )
-  Assert( Code\Definitions( 0 )\Type = #MethodDefinition )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #MethodDefinition )
   Assert( Code\Definitions( 0 )\Flags = 0 )
   Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
   Assert( Code\Definitions( 0 )\InnerScope = 1 )
@@ -959,7 +1109,7 @@ ProcedureUnit CanParseTypeDefinitionWithAnnotation()
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\Identifiers( 0 ) = "first" )
   Assert( Code\Definitions( 0 )\Name = 0 )
-  Assert( Code\Definitions( 0 )\Type = #TypeDefinition )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #TypeDefinition )
   Assert( Code\Definitions( 0 )\Flags = 0 )
   Assert( Code\Definitions( 0 )\FirstAnnotation = 0 )
   Assert( Code\AnnotationCount = 2 )
@@ -978,7 +1128,7 @@ ProcedureUnit CanParseSimpleProgram()
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\Identifiers( 0 ) = "first" )
   Assert( Code\Definitions( 0 )\Name = 0 )
-  Assert( Code\Definitions( 0 )\Type = #ProgramDefinition )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #ProgramDefinition )
   Assert( Code\Definitions( 0 )\Flags = 0 )
   Assert( Code\Definitions( 0 )\FirstAnnotation = 0 )
   Assert( Code\AnnotationCount = 2 )
@@ -1505,6 +1655,7 @@ EndIf
 ;[X] Program is transferred To player
 ;[X] Can parse functions
 ;[X] Can parse return statement
+;[ ] "Standard" library is automatically injected
 ;[ ] Can parse expressions
 ;[ ] Functions are translated
 ;[ ] Program is being run
@@ -1531,6 +1682,9 @@ EndIf
 
 ;[ ] Vim mode
 
+; Optimizations
+; - Make a pass over the structs and make them more compact (indices can be 32bit, for example)
+
 ; What I want
 ; - All tests are being run continuously on all connected players (smart execution to narrow down run sets)
 ; - Everything is saved automatically
@@ -1548,7 +1702,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 1506
-; FirstLine = 1475
+; CursorPosition = 1065
+; FirstLine = 1060
 ; Folding = -------
 ; EnableXP

@@ -1,0 +1,8 @@
+
+ABSTRACT TYPE Object;
+    ABSTRACT TYPE Number;
+        TYPE Integer : Number;
+        TYPE Float : Number;
+    ABSTRACT TYPE String;
+        MUTABLE TYPE MutableString : String;
+        IMMUTABLE TYPE ImmutableString : String;
