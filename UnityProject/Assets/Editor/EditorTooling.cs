@@ -17,7 +17,6 @@ public static class EditorTooling
         // Connect to IDE.
         s_Client = new TcpClient();
         await s_Client.ConnectAsync("127.0.0.1", 10978);
-
         var exit = false;
         while (!exit)
         {

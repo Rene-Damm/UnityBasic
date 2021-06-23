@@ -102,7 +102,7 @@ GOSCI_SetStyleFont( Scintilla, #StyleAnnotation, "", -1, #PB_Font_Italic )
 GOSCI_SetStyleColors( Scintilla, #StyleAnnotation, $006400 )
       
 GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END", #StyleKeyword )
-GOSCI_AddKeywords( Scintilla, "#DESCRIPTION #DETAILS #COMPANY #PRODUCT", #StyleAnnotation )
+GOSCI_AddKeywords( Scintilla, "|DESCRIPTION |DETAILS |COMPANY |PRODUCT |CATEGORY", #StyleAnnotation )
 
 SetActiveGadget( Scintilla )
 
@@ -194,10 +194,13 @@ EndStructure
 ;;;;REVIEW: allow specifying annotations that only relate to a certain build platform?
 Enumeration AnnotationKind
   
+  ;;;;REVIEW: rename "DESCRIPTION" to "SUMMARY"??
+  
   ; Doc annotations.
   #DescriptionAnnotation
   #DetailsAnnotation
   #ExampleAnnotation
+  #CategoryAnnotation
   
   ; Test annotations.
   #TestAnnotation
@@ -246,6 +249,15 @@ Enumeration TypeKind
 EndEnumeration
 CompilerEndIf
 
+; -1 is invalid index. Further negative values are "built-in" types, i.e. types for
+; which literal values exist. Note that Boolean isn't among them -- True and False are singletons.
+Enumeration BuiltinType
+  #IntegerType = -2
+  #FloatType = -3
+  #ImmutableStringType = -4
+  #MutableStringType = -5
+EndEnumeration
+
 Enumeration Operator
   #LiteralExpression
   #NameExpression
@@ -285,6 +297,7 @@ EndEnumeration
 
 Structure Statement
   StatementKind.i
+  ReferencedIndex.i ; Depends on the kind of statement which array this refers to.
   NextStatement.i
 EndStructure
 
@@ -309,6 +322,7 @@ EnumerationBinary DefinitionFlags
   #IsSingleton ; 'object' in code
   #IsExtend
   #IsReplace
+  #IsIterator
 EndEnumeration
 
 Structure Parameter
@@ -533,21 +547,23 @@ Procedure.i ParseModifier( *Parser.Parser )
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "abstract", 8 )
     ProcedureReturn #IsAbstract
-  ElseIf MatchToken( *Parser, "extend", 6 )
-    ProcedureReturn #IsExtend
+  ElseIf MatchToken( *Parser, "mutable", 7 )
+    ProcedureReturn #IsMutable
+  ElseIf MatchToken( *Parser, "immutable", 9 )
+    ProcedureReturn #IsImmutable
+  ElseIf MatchToken( *Parser, "iterator", 8 )
+    ProcedureReturn #IsIterator
   ElseIf MatchToken( *Parser, "before", 6 )
     ProcedureReturn #IsBefore
   ElseIf MatchToken( *Parser, "after", 5 )
     ProcedureReturn #IsAfter
   ElseIf MatchToken( *Parser, "around", 6 )
     ProcedureReturn #IsAround
-  ElseIf MatchToken( *Parser, "mutable", 7 )
-    ProcedureReturn #IsMutable
-  ElseIf MatchToken( *Parser, "immutable", 9 )
-    ProcedureReturn #IsImmutable
   ElseIf MatchToken( *Parser, "import", 6 )
     ProcedureReturn #IsImport
-  ElseIf MatchToken( *Parser, "replace", 7 )
+  ElseIf MatchToken( *Parser, "extend", 6 )
+    ProcedureReturn #IsExtend
+  ElseIf MatchToken( *Parser, "replace", 7 ) ;;;;REVIEW: 'override'?
     ProcedureReturn #IsReplace
   EndIf
   ProcedureReturn 0
@@ -654,7 +670,7 @@ Procedure.i ParseAnnotation( *Parser.Parser )
   If *Parser\CurrentLine = LineBefore And *Parser\CurrentLine <> 1
     ProcedureReturn -1
   EndIf
-  If Not MatchToken( *Parser, "#", 1, #True )
+  If Not MatchToken( *Parser, "|", 1, #True )
     ProcedureReturn -1
   EndIf
   
@@ -663,6 +679,8 @@ Procedure.i ParseAnnotation( *Parser.Parser )
     AnnotationKind = #DescriptionAnnotation
   ElseIf MatchToken( *Parser, "details", 7 )
     AnnotationKind = #DetailsAnnotation
+  ElseIf MatchToken( *Parser, "category", 8 )
+    AnnotationKind = #CategoryAnnotation
   ElseIf MatchToken( *Parser, "product", 7 )
     AnnotationKind = #ProductAnnotation
   ElseIf MatchToken( *Parser, "company", 7 )
@@ -770,10 +788,21 @@ Procedure.i ParseStatement( *Parser.Parser )
   
   SkipWhitespace( *Parser )
   
-  Define.i Statement
+  Define.i Statement = -1
+  Define.i ReferencedIndex = -1
+  
   If MatchToken( *Parser, "return", 6 )
-    ExpectSymbol( *Parser, ";", 1 )
+    
+    SkipWhitespace( *Parser )
+    If Not MatchToken( *Parser, ";", 1, #True )
+      
+      ReferencedIndex = ParseExpression( *Parser )
+      ExpectSymbol( *Parser, ";", 1 )
+      
+    EndIf
+    
     Statement = #ReturnStatement
+    
   Else
     ProcedureReturn -1
   EndIf
@@ -786,6 +815,7 @@ Procedure.i ParseStatement( *Parser.Parser )
   Code\StatementCount + 1
   
   *Statement\StatementKind = Statement
+  *Statement\ReferencedIndex = ReferencedIndex
   *Statement\NextStatement = -1
   
   If *Parser\CurrentStatement <> -1
@@ -959,7 +989,8 @@ Procedure ParseText()
     EndIf
   Wend
   
-  Debug( "Definitions: " + Str( Code\DefinitionCount ) )
+  Debug( "Definitions: " + Str( Code\DefinitionCount ) + ", Expressions: " +
+         Str( Code\ExpressionCount ) + ", Statements: " + Str( Code\StatementCount ) )
   
 EndProcedure
 
@@ -1100,7 +1131,7 @@ ProcedureUnit CanParseSimpleMethodDefinition()
   Assert( Code\Statements( 0 )\StatementKind = #ReturnStatement )
   Assert( Code\Statements( 0 )\NextStatement = -1 )
 EndProcedureUnit
-  
+
 ProcedureUnit CanParseTypeDefinitionWithAnnotation()
   ResetCode()
   TestParseText( @ParseDefinition(), ~"#DESCRIPTION Something\n#DETAILS Foo\ntype First;", 0 )
@@ -1161,6 +1192,9 @@ Procedure GenerateDocs()
   DeleteDirectory( FunctionsFolder, "*.html" )
   CreateDirectory( TypesFolder )
   CreateDirectory( FunctionsFolder )
+  
+  ;;;;TODO: sort alphabetically
+  ;;;;TODO: put types in inheritance hierarchy (okay if a type is mentioned more than once; or introduce groups for stuff like "A & B"?)
   
   ; Populate TOC.
   Define.i TOCFile = OpenFile( #PB_Any, GeneratedDocsPath + "\toc.html" )
@@ -1715,9 +1749,15 @@ EndIf
 ;[X] Can parse functions
 ;[X] Can parse return statement
 ;[X] "Standard" library is automatically injected
-;[ ] Can parse expressions
-;[ ] Functions are translated
+;[X] Can parse expressions
+;[ ] Add DOTS to Unity project
+;[ ] Methods are translated
 ;[ ] Program is being run
+;[ ] Can add comments
+;[ ] Methods can have value parameters
+;[ ] Can invoke methods
+;[ ] Can have conditional branches
+;[ ] Can have loops
 ;[ ] Can add asset to project
 ;[ ] Assets are being built and rebuilt into asset bundles
 ;[ ] Player can load asset bundles
@@ -1726,6 +1766,13 @@ EndIf
 ;[ ] Program is migrated from one run to the next
 
 ; ....
+
+;[ ] Can write parameterized types
+;[ ] Can instantiate parameterized types
+;[ ] Can write parameterized methods
+;[ ] Can invoke parameterized methods
+
+; ...
 
 ;[ ] Dark theme for text editor
 ;[ ] Diagnostics are shown as annotations on code
@@ -1761,7 +1808,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 1424
-; FirstLine = 1400
+; CursorPosition = 672
+; FirstLine = 649
 ; Folding = -------
 ; EnableXP

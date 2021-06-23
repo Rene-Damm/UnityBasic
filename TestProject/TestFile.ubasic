@@ -1,6 +1,6 @@
 
-#PRODUCT MyProduct
-#COMPANY MyCompany
+|PRODUCT MyProduct
+|COMPANY MyCompany
 PROGRAM FirstProgram;
 
 TYPE FirstType;
@@ -9,9 +9,10 @@ TYPE OtherType;
 
 TYPE Next;
 
-#DESCRIPTION The fourth type.
+|DESCRIPTION The fourth type.
 TYPE Fourth;
 
-METHOD MyMethod()
+METHOD MyMethod() : INTEGER
 BEGIN
+    RETURN 1234;
 END;

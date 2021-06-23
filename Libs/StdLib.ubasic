@@ -1,8 +1,44 @@
 
+|CATEGORY StdLib
 ABSTRACT TYPE Object;
-    ABSTRACT TYPE Number;
-        TYPE Integer : Number;
-        TYPE Float : Number;
-    ABSTRACT TYPE String;
-        MUTABLE TYPE MutableString : String;
-        IMMUTABLE TYPE ImmutableString : String;
+
+    ABSTRACT TYPE Literal : Object;
+
+        ABSTRACT TYPE Number : Literal;
+
+            IMMUTABLE TYPE Integer : Number;
+            IMMUTABLE TYPE Float : Number;
+
+        ABSTRACT TYPE String : Literal;
+
+            MUTABLE TYPE MutableString : String;
+            IMMUTABLE TYPE ImmutableString : String;
+
+        ABSTRACT TYPE Boolean : Literal;
+
+            IMMUTABLE OBJECT True : Boolean;
+            IMMUTABLE OBJECT False : Boolean;
+
+    |CATEGORY Assets
+    ABSTRACT TYPE Asset : Object;
+
+        TYPE Sprite : Asset;
+        TYPE Model : Asset;
+        TYPE Texture : Asset;
+        TYPE Shader : Asset;
+        TYPE Sound : Asset;
+
+    |CATEGORY Entities
+    ABSTRACT TYPE Entity : Object;
+
+    |CATEGORY Entities
+    ABSTRACT TYPE Component : Object;
+
+        TYPE Transform : Component;
+
+    |CATEGORY Entities
+    ABSTRACT TYPE System : Object;
+
+        TYPE TransformSystem : System;
+
+    OBJECT App : Object;
