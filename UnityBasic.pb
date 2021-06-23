@@ -273,6 +273,7 @@ Enumeration StatementKind
   #ContinueStatement
   #IfStatement
   #SwitchStatement
+  #DefinitionStatement
 EndEnumeration
 
 Structure Statement
@@ -317,7 +318,7 @@ Structure Definition
   Flags.i
   InnerScope.i
   Region.TextRegion
-  NextDefinitionInScope.i
+  NextDefinition.i
   FirstAnnotation.i ; -1 if none.
   FirstClause.i     ; -1 if none.
   FirstTypeParameter.i ; -1 if none.
@@ -327,7 +328,7 @@ EndStructure
 Structure Scope
   Parent.i ; -1 is global scope.
   Definition.i ; -1 is global scope.
-  FirstDefinition.i
+  FirstDefinitionOrStatement.i ; Whether definition or statement depends on the type of scope.
 EndStructure
 
 Structure Diagnostic
@@ -388,12 +389,14 @@ Structure Parser
   CurrentColumn.i
   CurrentScope.i
   CurrentDefinitionInScope.i
+  CurrentStatement.i
   ;store failure state here; func to reset
 EndStructure
 
 Macro PushScope( Parser )
   Define.i PreviousScope = Parser\CurrentScope
   Define.i PreviousDefinitionInScope = Parser\CurrentDefinitionInScope
+  Define.i PreviousStatementInScope = Parser\CurrentStatement
   Define.i CurrentScope = Code\ScopeCount
   If ArraySize( Code\Scopes() ) = CurrentScope
     ReDim Code\Scopes( CurrentScope + 256 )
@@ -401,11 +404,13 @@ Macro PushScope( Parser )
   Code\ScopeCount + 1
   Parser\CurrentScope = CurrentScope
   Parser\CurrentDefinitionInScope = -1
+  Parser\CurrentStatement = -1
 EndMacro
 
 Macro PopScope( Parser )
   Parser\CurrentScope = PreviousScope
   Parser\CurrentDefinitionInScope = PreviousDefinionInScope
+  Parser\CurrentStatement = PreviousStatementInScope
   CurrentScope = PreviousScope
 EndMacro
 
@@ -491,6 +496,14 @@ Procedure.i MatchToken( *Parser.Parser, Token.s, Length.i, AnyFollowing = #False
   *Parser\Position + Index
   *Parser\CurrentColumn + Index
   ProcedureReturn #True
+EndProcedure
+
+Procedure ExpectSymbol( *Parser.Parser, Symbol.s, Length.i )
+  SkipWhitespace( *Parser )
+  If Not MatchToken( *Parser, Symbol, Length, #True )
+    ;;;;TODO: diagnose
+    Debug "Expecting " + Symbol
+  EndIf
 EndProcedure
 
 ; Returns a DefinitionFlag.
@@ -651,6 +664,37 @@ Procedure.i ParseAnnotation( *Parser.Parser )
   
 EndProcedure
 
+Procedure.i ParseStatement( *Parser.Parser )
+  
+  SkipWhitespace( *Parser )
+  
+  Define.i Statement
+  If MatchToken( *Parser, "return", 6 )
+    ExpectSymbol( *Parser, ";", 1 )
+    Statement = #ReturnStatement
+  Else
+    ProcedureReturn -1
+  EndIf
+  
+  Define.i StatementIndex = Code\StatementCount
+  If ArraySize( Code\Statements() ) = StatementIndex
+    ReDim Code\Statements( StatementIndex + 512 )
+  EndIf
+  Define.Statement *Statement = @Code\Statements( StatementIndex )
+  Code\StatementCount + 1
+  
+  *Statement\StatementKind = Statement
+  *Statement\NextStatement = -1
+  
+  If *Parser\CurrentStatement <> -1
+    Code\Statements( *Parser\CurrentStatement )\NextStatement = StatementIndex
+  EndIf
+  *Parser\CurrentStatement = StatementIndex
+  
+  ProcedureReturn StatementIndex
+  
+EndProcedure
+
 ; Returns index of definition or -1 on failure.
 Procedure.i ParseDefinition( *Parser.Parser )
   
@@ -725,20 +769,21 @@ Procedure.i ParseDefinition( *Parser.Parser )
   *Definition\Flags = Flags
   *Definition\Name = Name
   *Definition\Type = Type
-  *Definition\NextDefinitionInScope = -1
+  *Definition\NextDefinition = -1
   *Definition\InnerScope = -1
   *Definition\FirstAnnotation = FirstAnnotation
   *Definition\FirstClause = -1
   *Definition\FirstValueParameter = -1
   *Definition\FirstTypeParameter = -1
   *Definition\Region = *Parser\LastRegion
+  *Definition\Scope = *Parser\CurrentScope
   Code\DefinitionCount + 1
   
   ; Add to scope.
   If *Parser\CurrentDefinitionInScope <> -1
-    Code\Definitions( *Parser\CurrentDefinitionInScope )\NextDefinitionInScope = DefinitionIndex
+    Code\Definitions( *Parser\CurrentDefinitionInScope )\NextDefinition = DefinitionIndex
   Else
-    Code\Scopes( *Parser\CurrentScope )\FirstDefinition = DefinitionIndex
+    Code\Scopes( *Parser\CurrentScope )\FirstDefinitionOrStatement = DefinitionIndex
   EndIf
   *Parser\CurrentDefinitionInScope = DefinitionIndex
   
@@ -746,22 +791,14 @@ Procedure.i ParseDefinition( *Parser.Parser )
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "<", 1, #True )
     
-    SkipWhitespace( *Parser )
-    If Not MatchToken( *Parser, ">", 1, #True )
-      ;;;;TODO: diagnose expected '>'
-      Debug "Expecting '>'!!"
-    EndIf
+    ExpectSymbol( *Parser, ">", 1 )
   EndIf
   
   ; Parse value parameters.
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "(", 1, #True )
     
-    SkipWhitespace( *Parser )
-    If Not MatchToken( *Parser, ")", 1, #True )
-      ;;;;TODO: diagnose expected '>'
-      Debug "Expecting ')'!!"
-    EndIf
+    ExpectSymbol( *Parser, ")", 1 )
   EndIf
   
   ; Parse clauses.
@@ -772,22 +809,21 @@ Procedure.i ParseDefinition( *Parser.Parser )
     
     PushScope( *Parser )
     *Definition\InnerScope = CurrentScope
+    Code\Scopes( CurrentScope )\Definition = DefinitionIndex
     
-    SkipWhitespace( *Parser )
-    If Not MatchToken( *Parser, "end", 3 )
-      ;;;;TODO: diagnose expected end
-      Debug "Missing 'end'!!!"
-    EndIf
+    While *Parser\Position < *Parser\EndPosition
+      Define.i Statement = ParseStatement( *Parser )
+      If Statement = -1
+        Break
+      EndIf
+    Wend
     
+    ExpectSymbol( *Parser, "end", 3)
     PopScope( *Parser )
     
   EndIf
   
-  SkipWhitespace( *Parser )
-  If Not MatchToken( *Parser, ";", 1, #True )
-    ;;;;TODO: diagnose missing semicolon
-    Debug "Missing semicolon!!"
-  EndIf
+  ExpectSymbol( *Parser, ";", 1 )
   
   ProcedureReturn DefinitionIndex
   
@@ -802,6 +838,7 @@ Procedure ParseText()
   Parser\EndPosition = *Text + TextLength
   Parser\StartPosition = *Text
   Parser\CurrentDefinitionInScope = -1
+  Parser\CurrentStatement = -1
   Parser\CurrentLine = 1
   Parser\CurrentColumn = 1
   
@@ -826,6 +863,7 @@ Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
   Parser\EndPosition = *Buffer + Length
   Parser\StartPosition = *Buffer
   Parser\CurrentDefinitionInScope = -1
+  Parser\CurrentStatement = -1
   Parser\CurrentLine = 1
   Parser\CurrentColumn = 1
   Assert( Fn( @Parser ) = Expected )
@@ -895,10 +933,11 @@ EndProcedureUnit
 
 ProcedureUnit CanParseSimpleMethodDefinition()
   ResetCode()
-  TestParseText( @ParseDefinition(), "method First() begin end;", 0 )
+  TestParseText( @ParseDefinition(), "method First() begin return; end;", 0 )
   Assert( Code\DefinitionCount = 1 )
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\ScopeCount = 2 )
+  Assert( Code\StatementCount = 1 )
   Assert( Code\Identifiers( 0 ) = "first" )
   Assert( Code\Definitions( 0 )\Name = 0 )
   Assert( Code\Definitions( 0 )\Type = #MethodDefinition )
@@ -907,6 +946,10 @@ ProcedureUnit CanParseSimpleMethodDefinition()
   Assert( Code\Definitions( 0 )\InnerScope = 1 )
   Assert( Code\Definitions( 0 )\FirstValueParameter = -1 )
   Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
+  Assert( Code\Scopes( 1 )\Definition = 0 )
+  Assert( Code\Scopes( 1 )\FirstDefinitionOrStatement = 0 )
+  Assert( Code\Statements( 0 )\StatementKind = #ReturnStatement )
+  Assert( Code\Statements( 0 )\NextStatement = -1 )
 EndProcedureUnit
   
 ProcedureUnit CanParseTypeDefinitionWithAnnotation()
@@ -1461,7 +1504,7 @@ EndIf
 ;[X] Unity player connects to IDE
 ;[X] Program is transferred To player
 ;[X] Can parse functions
-;[ ] Can parse return statement
+;[X] Can parse return statement
 ;[ ] Can parse expressions
 ;[ ] Functions are translated
 ;[ ] Program is being run
@@ -1479,6 +1522,7 @@ EndIf
 ;[ ] Can generate docs from code
 ;[ ] Can jump to docs by pressing F1
 ;[ ] Can jump to definition by pressing F2
+;[ ] Can jump to definition by opening goto popup
 ;[ ] Can run tests from code in player
 ;[ ] Syntax highlighting in text editor
 ;[ ] Auto-completion in text editor
@@ -1504,7 +1548,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 100
-; FirstLine = 66
-; Folding = ------
+; CursorPosition = 1506
+; FirstLine = 1475
+; Folding = -------
 ; EnableXP
