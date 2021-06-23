@@ -100,9 +100,22 @@ GOSCI_SetStyleColors( Scintilla, #StyleKeyword, $800000 )
 
 GOSCI_SetStyleFont( Scintilla, #StyleAnnotation, "", -1, #PB_Font_Italic )
 GOSCI_SetStyleColors( Scintilla, #StyleAnnotation, $006400 )
-      
-GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END", #StyleKeyword )
+
+GOSCI_SetStyleFont( Scintilla, #StyleComment, "", -1, #PB_Font_Italic )
+GOSCI_SetStyleColors( Scintilla, #StyleComment, $006400 )
+
+GOSCI_SetStyleColors( Scintilla, #StyleString, #Gray )
+
+GOSCI_SetStyleColors( Scintilla, #StyleFunction, #Blue )
+
+GOSCI_AddDelimiter( Scintilla, "//", "", #GOSCI_DELIMITTOENDOFLINE, #StyleComment )
+GOSCI_AddDelimiter( Scintilla, "/*", "*/", #GOSCI_DELIMITTOENDOFLINE, #StyleComment )
+GOSCI_AddDelimiter( Scintilla, ~"\"", ~"\"", #GOSCI_DELIMITBETWEEN, #StyleString )
+
+GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END RETURN", #StyleKeyword )
 GOSCI_AddKeywords( Scintilla, "|DESCRIPTION |DETAILS |COMPANY |PRODUCT |CATEGORY", #StyleAnnotation )
+
+GOSCI_SetLexerOption( Scintilla, #GOSCI_LEXEROPTION_SEPARATORSYMBOLS, @"=+-*/%()[],.;" )
 
 SetActiveGadget( Scintilla )
 
@@ -493,22 +506,71 @@ Procedure.i IsAlphanumeric( Character.c )
   ProcedureReturn #False
 EndProcedure
 
+; Skips over whitespace characters and comments.
 Procedure SkipWhitespace( *Parser.Parser, AllowNewline.b = #True )
+  
+  Define.i CommentNestingDepth = 0
+  
   While *Parser\Position < *Parser\EndPosition
     Define.b Char = PeekB( *Parser\Position )
+    
+    ; Comments.
+    ; We don't allow comments in 'Not AllowNewline' sectiosn
+    If AllowNewline And Char = '/' And *Parser\EndPosition - *Position >= 2
+      Define.b NextChar = PeekB( *Parser\Position + 1 )
+      If NextChar = '/' And CommentNestingDepth = 0
+        *Parser\Position + 2
+        *Parser\CurrentColumn + 2
+        While *Parser\Position < *Parser\EndPosition
+          Char = PeekB( *Parser\Position )
+          If Char = #NEWLINE
+            Break
+          EndIf
+          *Parser\Position + 1
+          *Parser\CurrentColumn + 1
+        Wend
+      ElseIf NextChar = '*'
+        *Parser\Position + 2
+        *Parser\CurrentColumn + 2
+        CommentNestingDepth + 1
+        If *Parser\Position < *Parser\EndPosition
+          Char = PeekB( *Parser\Position )
+        Else
+          Break
+        EndIf
+      EndIf
+    ElseIf CommentNestingDepth > 0 And Char = '*' And *Parser\EndPosition - *Position >= 2
+      Define.b NextChar = PeekB( *Parser\Position + 1 )
+      If NextChar = '/'
+        CommentNestingDepth - 1
+        *Parser\Position + 2
+        *Parser\CurrentColumn + 2
+        If *Parser\Position < *Parser\EndPosition
+          Char = PeekB( *Parser\Position )
+        Else
+          Break
+        EndIf
+      EndIf
+    EndIf
+    
     If Not AllowNewline And Char = #NEWLINE
       Break
     EndIf
-    If Not IsWhitespace( Char )
+    
+    If Not IsWhitespace( Char ) And CommentNestingDepth = 0
       Break
     EndIf
+    
     If Char = #NEWLINE
       *Parser\CurrentLine + 1
       *Parser\CurrentColumn = 0
     EndIf
+    
     *Parser\Position + 1
     *Parser\CurrentColumn + 1
+    
   Wend
+  
 EndProcedure
 
 Procedure.i MatchToken( *Parser.Parser, Token.s, Length.i, AnyFollowing = #False )
@@ -1011,6 +1073,13 @@ Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
   FreeMemory( *Buffer )
 EndProcedure
 
+ProcedureUnit CanSkipComments()
+  ResetCode()
+  TestParseText( @ParseModifier(), "/* foo */ abstract", #IsAbstract )
+  TestParseText( @ParseModifier(), ~"// foo\n abstract", #IsAbstract )
+  TestParseText( @ParseModifier(), "/* /* foo */ */ abstract", #IsAbstract )
+EndProcedureUnit
+
 ProcedureUnit CanParseModifier()
   ResetCode()
   TestParseText( @ParseModifier(), "abstract", #IsAbstract )
@@ -1057,7 +1126,7 @@ EndProcedureUnit
   
 ProcedureUnit CanParseAnnotation()
   ResetCode()
-  TestParseText( @ParseAnnotation(), "#DESCRIPTION Foo", 0 )
+  TestParseText( @ParseAnnotation(), "|DESCRIPTION Foo", 0 )
   Assert( Code\AnnotationCount = 1 )
   Assert( Code\Annotations( 0 )\AnnotationKind = #DescriptionAnnotation )
   Assert( Code\Annotations( 0 )\AnnotationText = "Foo" )
@@ -1134,7 +1203,7 @@ EndProcedureUnit
 
 ProcedureUnit CanParseTypeDefinitionWithAnnotation()
   ResetCode()
-  TestParseText( @ParseDefinition(), ~"#DESCRIPTION Something\n#DETAILS Foo\ntype First;", 0 )
+  TestParseText( @ParseDefinition(), ~"|DESCRIPTION Something\n|DETAILS Foo\ntype First;", 0 )
   Assert( Code\DefinitionCount = 1 )
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\Identifiers( 0 ) = "first" )
@@ -1153,7 +1222,7 @@ EndProcedureUnit
   
 ProcedureUnit CanParseSimpleProgram()
   ResetCode()
-  TestParseText( @ParseDefinition(), ~"#PRODUCT MyProduct\n#COMPANY MyCompany\nprogram First;", 0 )
+  TestParseText( @ParseDefinition(), ~"|PRODUCT MyProduct\n|COMPANY MyCompany\nprogram First;", 0 )
   Assert( Code\DefinitionCount = 1 )
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\Identifiers( 0 ) = "first" )
@@ -1169,6 +1238,8 @@ ProcedureUnit CanParseSimpleProgram()
   Assert( Code\Annotations( 1 )\AnnotationText = "MyCompany" )
   Assert( Code\Annotations( 1 )\NextAnnotation = -1 )
 EndProcedureUnit
+
+CanSkipComments()
 
 ;==============================================================================
 ; Documentation.
@@ -1195,6 +1266,7 @@ Procedure GenerateDocs()
   
   ;;;;TODO: sort alphabetically
   ;;;;TODO: put types in inheritance hierarchy (okay if a type is mentioned more than once; or introduce groups for stuff like "A & B"?)
+  ;;;;TODO: also have a tab for assets; in fact, the browser should basically be a browsable HTML version of the project
   
   ; Populate TOC.
   Define.i TOCFile = OpenFile( #PB_Any, GeneratedDocsPath + "\toc.html" )
@@ -1750,14 +1822,14 @@ EndIf
 ;[X] Can parse return statement
 ;[X] "Standard" library is automatically injected
 ;[X] Can parse expressions
-;[ ] Add DOTS to Unity project
-;[ ] Methods are translated
-;[ ] Program is being run
-;[ ] Can add comments
+;[X] Add DOTS to Unity project
+;[X] Can add comments
 ;[ ] Methods can have value parameters
 ;[ ] Can invoke methods
 ;[ ] Can have conditional branches
 ;[ ] Can have loops
+;[ ] Methods are translated
+;[ ] Program is being run
 ;[ ] Can add asset to project
 ;[ ] Assets are being built and rebuilt into asset bundles
 ;[ ] Player can load asset bundles
@@ -1808,7 +1880,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 672
-; FirstLine = 649
+; CursorPosition = 1825
+; FirstLine = 1785
 ; Folding = -------
 ; EnableXP
