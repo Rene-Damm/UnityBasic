@@ -11,3 +11,7 @@ TYPE Next;
 
 #DESCRIPTION The fourth type.
 TYPE Fourth;
+
+METHOD MyMethod()
+BEGIN
+END;

@@ -98,8 +98,8 @@ GOSCI_SetStyleColors( Scintilla, #StyleKeyword, $800000 )
 GOSCI_SetStyleFont( Scintilla, #StyleAnnotation, "", -1, #PB_Font_Italic )
 GOSCI_SetStyleColors( Scintilla, #StyleAnnotation, $006400 )
       
-GOSCI_AddKeywords( Scintilla, "TYPE", #StyleKeyword )
-GOSCI_AddKeywords( Scintilla, "#DESCRIPTION #DETAILS", #StyleAnnotation )
+GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END", #StyleKeyword )
+GOSCI_AddKeywords( Scintilla, "#DESCRIPTION #DETAILS #COMPANY #PRODUCT", #StyleAnnotation )
 
 SetActiveGadget( Scintilla )
 
@@ -219,6 +219,7 @@ EndStructure
 Enumeration ClauseKind
   #PreconditionClause
   #PostconditionClause
+  #InvariantClause
   #WhereClause
 EndEnumeration
 
@@ -238,6 +239,7 @@ Enumeration TypeKind
   #IntersectionType
   #InstancedType
   #TupleType
+  #DependentType
 EndEnumeration
 CompilerEndIf
 
@@ -392,12 +394,19 @@ EndStructure
 Macro PushScope( Parser )
   Define.i PreviousScope = Parser\CurrentScope
   Define.i PreviousDefinitionInScope = Parser\CurrentDefinitionInScope
-  ;;TODO
+  Define.i CurrentScope = Code\ScopeCount
+  If ArraySize( Code\Scopes() ) = CurrentScope
+    ReDim Code\Scopes( CurrentScope + 256 )
+  EndIf
+  Code\ScopeCount + 1
+  Parser\CurrentScope = CurrentScope
+  Parser\CurrentDefinitionInScope = -1
 EndMacro
 
 Macro PopScope( Parser )
   Parser\CurrentScope = PreviousScope
   Parser\CurrentDefinitionInScope = PreviousDefinionInScope
+  CurrentScope = PreviousScope
 EndMacro
 
 Procedure.c ToLower( Character.c )
@@ -720,6 +729,8 @@ Procedure.i ParseDefinition( *Parser.Parser )
   *Definition\InnerScope = -1
   *Definition\FirstAnnotation = FirstAnnotation
   *Definition\FirstClause = -1
+  *Definition\FirstValueParameter = -1
+  *Definition\FirstTypeParameter = -1
   *Definition\Region = *Parser\LastRegion
   Code\DefinitionCount + 1
   
@@ -732,19 +743,51 @@ Procedure.i ParseDefinition( *Parser.Parser )
   *Parser\CurrentDefinitionInScope = DefinitionIndex
   
   ; Parse type parameters.
+  SkipWhitespace( *Parser )
+  If MatchToken( *Parser, "<", 1, #True )
+    
+    SkipWhitespace( *Parser )
+    If Not MatchToken( *Parser, ">", 1, #True )
+      ;;;;TODO: diagnose expected '>'
+      Debug "Expecting '>'!!"
+    EndIf
+  EndIf
   
   ; Parse value parameters.
+  SkipWhitespace( *Parser )
+  If MatchToken( *Parser, "(", 1, #True )
+    
+    SkipWhitespace( *Parser )
+    If Not MatchToken( *Parser, ")", 1, #True )
+      ;;;;TODO: diagnose expected '>'
+      Debug "Expecting ')'!!"
+    EndIf
+  EndIf
   
   ; Parse clauses.
   
   ; Parse body.
   SkipWhitespace( *Parser )
-  If MatchToken( *Parser, ";", 1, #True )
-  ElseIf MatchToken( *Parser, "{", 1, #True )
-    ;;;;TODO
-  Else
-    ProcedureReturn -1
-  EndIf  
+  If MatchToken( *Parser, "begin", 5 )
+    
+    PushScope( *Parser )
+    *Definition\InnerScope = CurrentScope
+    
+    SkipWhitespace( *Parser )
+    If Not MatchToken( *Parser, "end", 3 )
+      ;;;;TODO: diagnose expected end
+      Debug "Missing 'end'!!!"
+    EndIf
+    
+    PopScope( *Parser )
+    
+  EndIf
+  
+  SkipWhitespace( *Parser )
+  If Not MatchToken( *Parser, ";", 1, #True )
+    ;;;;TODO: diagnose missing semicolon
+    Debug "Missing semicolon!!"
+  EndIf
   
   ProcedureReturn DefinitionIndex
   
@@ -831,6 +874,39 @@ ProcedureUnit CanParseSimpleTypeDefinition()
   Assert( Code\Definitions( 0 )\Type = #TypeDefinition )
   Assert( Code\Definitions( 0 )\Flags = 0 )
   Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
+  Assert( Code\Definitions( 0 )\FirstValueParameter = -1 )
+  Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
+EndProcedureUnit
+
+ProcedureUnit CanParseEmptyMethodDefinition()
+  ResetCode()
+  TestParseText( @ParseDefinition(), "method First;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\Type = #MethodDefinition )
+  Assert( Code\Definitions( 0 )\Flags = 0 )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
+  Assert( Code\Definitions( 0 )\InnerScope = -1 )
+  Assert( Code\Definitions( 0 )\FirstValueParameter = -1 )
+  Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
+EndProcedureUnit
+
+ProcedureUnit CanParseSimpleMethodDefinition()
+  ResetCode()
+  TestParseText( @ParseDefinition(), "method First() begin end;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\ScopeCount = 2 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\Type = #MethodDefinition )
+  Assert( Code\Definitions( 0 )\Flags = 0 )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
+  Assert( Code\Definitions( 0 )\InnerScope = 1 )
+  Assert( Code\Definitions( 0 )\FirstValueParameter = -1 )
+  Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
 EndProcedureUnit
   
 ProcedureUnit CanParseTypeDefinitionWithAnnotation()
@@ -1384,8 +1460,10 @@ EndIf
 ;[X] Program is generated
 ;[X] Unity player connects to IDE
 ;[X] Program is transferred To player
-;[ ] Can add functions
-;[ ] Can add simple statements
+;[X] Can parse functions
+;[ ] Can parse return statement
+;[ ] Can parse expressions
+;[ ] Functions are translated
 ;[ ] Program is being run
 ;[ ] Can add asset to project
 ;[ ] Assets are being built and rebuilt into asset bundles
@@ -1396,6 +1474,7 @@ EndIf
 
 ; ....
 
+;[ ] Dark theme for text editor
 ;[ ] Diagnostics are shown as annotations on code
 ;[ ] Can generate docs from code
 ;[ ] Can jump to docs by pressing F1
@@ -1414,13 +1493,18 @@ EndIf
 ; - Changes are picked up automatically and reload the application automatically to a known state and from there, continue with the changes applied
 ; - The toolchain is configured entirely from within annotations in the code
 
+; Plan
+; Wednesday: Program generation and *execution*
+; Thursday: Asset import and rendering (engine stuff)
+; Friday: Polish (cosmetics and bells&whistles)
+
 
 ; Qs:
 ; - How do I not make it depend on total program size but rather on change size?
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 1385
-; FirstLine = 1366
+; CursorPosition = 100
+; FirstLine = 66
 ; Folding = ------
 ; EnableXP
