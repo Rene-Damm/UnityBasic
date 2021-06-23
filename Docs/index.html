@@ -3,8 +3,42 @@
 <head>
     <meta charset="utf-8">
     <title>UnityBasic</title>
+    <style type="text/css">
+    body {
+        margin: 0px;
+        padding: 0px;
+    }
+    div#left {
+        position: fixed;
+        width: 20%;
+        height: 100%;
+    }
+    div#left > iframe {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: none;
+    } 
+    div#right {
+        position: fixed;
+        left: 20%;
+        width: 80%;
+        height: 100%;
+    }
+    div#right > iframe {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: none;
+    } 
+    </style>
 </head>
 <body>
-    <p>Welcome to UnityBasic!!!</p>
+    <div id="left">
+        <iframe src="toc.html"></iframe>
+    </div>
+    <div id="right">
+        <iframe src="welcome.html"></iframe>
+    </div>
 </body>
 </html>

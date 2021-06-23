@@ -1,12 +1,14 @@
 
 EnableExplicit
 
-Define.s UnityEditorExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
-Define.s UnityPlayerExecutablePath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject\Builds\UnityBasic64.exe"
-Define.s GeneratedProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
-Define.s GeneratedDocsPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Docs"
-Define.s SourceProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
-Define.s TextFilePath = SourceProjectPath + "\TestFile.code"
+XIncludeFile "GoScintilla/GoScintilla.pbi"
+
+Global.s UnityEditorExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
+Global.s UnityPlayerExecutablePath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject\Builds\UnityBasic64.exe"
+Global.s GeneratedProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
+Global.s GeneratedDocsPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Docs"
+Global.s SourceProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
+Global.s TextFilePath = SourceProjectPath + "\TestFile.code"
 
 #SPACE = 32
 #NEWLINE = 10
@@ -41,8 +43,9 @@ Define.i ContentWidth = WindowWidth
 Define.i ContentHeight = WindowHeight - StatusBarHeight( StatusBar )
 
 Global.i Scintilla = ScintillaGadget( #PB_Any, 0, 0, ContentWidth / 2, ContentHeight, 0 )
-Define.i DocViewer = WebGadget( #PB_Any, ContentWidth / 2, 0, ContentWidth / 2, ContentHeight / 2, "file:///" + ReplaceString( GeneratedDocsPath, "\", "/" ) + "/index.html" )
-Define.i PlayerContainer = ContainerGadget( #PB_Any, ContentWidth / 2, ContentHeight / 2, ContentWidth / 2 , ContentHeight / 2 )
+;;;;TODO: use navigation callback or popup blocker to navigate from docs to code (put links in generated doc)
+Global.i DocViewer = WebGadget( #PB_Any, ContentWidth / 2, 0, ContentWidth / 2, ContentHeight / 2, "file:///" + ReplaceString( GeneratedDocsPath, "\", "/" ) + "/index.html" )
+Global.i PlayerContainer = ContainerGadget( #PB_Any, ContentWidth / 2, ContentHeight / 2, ContentWidth / 2 , ContentHeight / 2 )
 
 ;;;;TODO: layout using splitters instead of fixed proportions
 ;Global Scintilla.i = ScintillaGadget( #PB_Any, 0, 0, 0, 0, 0 )
@@ -71,6 +74,10 @@ ReadData( TextFile, *Text, TextLength )
 PokeB( *Text + TextLength, 0 )
 ScintillaSendMessage( Scintilla, #SCI_SETTEXT, 0, *Text )
 ScintillaSendMessage( Scintilla, #SCI_SETREADONLY, 0 )
+Define *Font = UTF8( "Consolas" )
+ScintillaSendMessage( Scintilla, #SCI_STYLESETFONT, #STYLE_DEFAULT, *Font )
+ScintillaSendMessage( Scintilla, #SCI_STYLESETSIZE, #STYLE_DEFAULT, 16 )
+FreeMemory( *Font )
 
 SetActiveGadget( Scintilla )
 
@@ -158,6 +165,10 @@ Enumeration AnnotationKind
   ; Doc annotations.
   #DescriptionAnnotation
   #DetailsAnnotation
+  #ExampleAnnotation
+  
+  ; Test annotations.
+  #TestAnnotation
   
   ; Asset annotations.
   #AssetAnnotation
@@ -813,6 +824,101 @@ ProcedureUnit CanParseTypeDefinitionWithAnnotation()
 EndProcedureUnit
 
 ;==============================================================================
+; Documentation.
+
+;;;;TODO: support docs for language elements (just have manual tab with handwritten content?)
+
+Procedure GenerateDocs()
+  
+  Define.s TypesFolder = GeneratedDocsPath + "\Types"
+  Define.s FunctionsFolder = GeneratedDocsPath + "\Functions"
+  
+  Define.s TypelistBeginMarker = "<!--TYPELIST:BEGIN-->"
+  Define.s TypelistEndMarker = "<!--TYPELIST:END-->"
+  Define.s FunclistBeginMarker = "<!--FUNCLIST:BEGIN-->"
+  Define.s FunclistEndMarker = "<!--FUNCLIST:END-->"
+  
+  ; Remove existing generated doc files.
+  DeleteDirectory( TypesFolder, "*.html" )
+  DeleteDirectory( FunctionsFolder, "*.html" )
+  CreateDirectory( TypesFolder )
+  CreateDirectory( FunctionsFolder )
+  
+  ; Populate TOC.
+  Define.i TOCFile = OpenFile( #PB_Any, GeneratedDocsPath + "\toc.html" )
+  Define.s TOC = ReadString( TOCFile, #PB_UTF8 | #PB_File_IgnoreEOL )
+  
+  Define.i TypelistBegin = FindString( TOC, TypelistBeginMarker )
+  Define.i TypelistEnd = FindString( TOC, TypelistEndMarker )
+  Define.i FunclistBegin = FindString( TOC, FunclistBeginMarker )
+  Define.i FunclistEnd = FindString( TOC, FunclistEndMarker )
+  
+  If TypelistBegin = 0
+    Debug "Could not find TYPELIST:BEGIN in TOC"
+    ProcedureReturn
+  EndIf
+  If TypelistEnd = 0
+    Debug "Could not find TYPELIST:END in TOC"
+    ProcedureReturn
+  EndIf
+  If FunclistBegin = 0
+    Debug "Could not find FUNCLIST:BEGIN in TOC"
+    ProcedureReturn
+  EndIf
+  If FunclistEnd = 0
+    Debug "Could not find FUNCLIST:END in TOC"
+    ProcedureReturn
+  EndIf
+  
+  TypelistEnd + Len( TypelistBeginMarker )
+  FunclistEnd + Len( FunclistEndMarker )
+  
+  Define.s Prefix = Left( TOC, TypelistBegin - 1 )
+  Define.s Midsection = Mid( TOC, TypelistEnd, FunclistBegin - TypelistEnd )
+  Define.s Suffix = Right( TOC, Len( TOC ) - FunclistEnd - 1 )
+  
+  Define.i Index
+  
+  FileSeek( TOCFile, 0 )
+  TruncateFile( TOCFile )
+  WriteString( TOCFile, Prefix, #PB_UTF8 )
+  WriteString( TOCFile, TypelistBeginMarker, #PB_UTF8 )
+  WriteString( TOCFile, ~"\n", #PB_UTF8 )
+  For Index = 0 To Code\DefinitionCount - 1
+    Define.Definition *Definition = @Code\Definitions( Index )
+    If *Definition\Type <> #TypeDefinition
+      Continue
+    EndIf
+    Define.s Name = Code\Identifiers( *Definition\Name )
+    WriteString( TOCFile, ~"<li><a href=\"Types\\" + Name + ~".html\">" + Name + ~"</a></li>\n" )
+  Next
+  WriteString( TOCFile, TypelistEndMarker, #PB_UTF8 )
+  WriteString( TOCFile, ~"\n", #PB_UTF8 )
+  WriteString( TOCFile, Midsection, #PB_UTF8 )
+  WriteString( TOCFile, FunclistBeginMarker, #PB_UTF8 )
+  WriteString( TOCFile, ~"\n", #PB_UTF8 )
+  For Index = 0 To Code\DefinitionCount - 1
+    Define.Definition *Definition = @Code\Definitions( Index )
+    If *Definition\Type <> #MethodDefinition
+      Continue
+    EndIf
+  Next
+  WriteString( TOCFile, FunclistEndMarker, #PB_UTF8 )
+  WriteString( TOCFile, ~"\n", #PB_UTF8 )
+  WriteString( TOCFile, Suffix, #PB_UTF8 )
+  
+  CloseFile( TOCFile )
+  
+  ; Reload browser.
+  ;;;;FIXME: blanks out the browser...
+  ;SetGadgetState( DocViewer, #PB_Web_Refresh )
+  
+EndProcedure
+
+Procedure OpenDocsForDefinition( DefinitionType.i, Name.s )
+EndProcedure
+
+;==============================================================================
 ; Code generation.
 ;;;;TODO: put this stuff on a thread
 
@@ -896,9 +1002,14 @@ EndStructure
 Global Program.Program
 
 Structure GenType
+  FieldCount.i
+  FirstField.i
 EndStructure
 
+; These are de-duplicated. One instance of the same field is applied to every
+; single type it applies to.
 Structure GenField
+  NextField.i
 EndStructure
 
 Structure GenFunction
@@ -1030,6 +1141,7 @@ Procedure UpdateProgram()
     ProcedureReturn
   EndIf
   SendProgram()
+  GenerateDocs()
 EndProcedure
 
 ProcedureUnit CanCompileSimpleProgram()
@@ -1206,7 +1318,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 617
-; FirstLine = 595
+; CursorPosition = 3
+; FirstLine = 2
 ; Folding = ------
 ; EnableXP

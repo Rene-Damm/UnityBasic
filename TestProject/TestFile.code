@@ -5,3 +5,5 @@ TYPE OtherType;
 
 TYPE Next;
 
+#DESCRIPTION The fourth type.
+TYPE Fourth;

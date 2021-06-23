@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Table of Contents</title>
+    <style type="text/css">
+        /* Style the tab */
+        .tab {
+          overflow: hidden;
+          border: 1px solid #ccc;
+          background-color: #f1f1f1;
+        }
+
+        /* Style the buttons that are used to open the tab content */
+        .tab button {
+          background-color: inherit;
+          float: left;
+          border: none;
+          outline: none;
+          cursor: pointer;
+          padding: 14px 16px;
+          transition: 0.3s;
+        }
+
+        /* Change background color of buttons on hover */
+        .tab button:hover {
+          background-color: #ddd;
+        }
+
+        /* Create an active/current tablink class */
+        .tab button.active {
+          background-color: #ccc;
+        }
+
+        /* Style the tab content */
+        .tabcontent {
+          display: none;
+          padding: 6px 12px;
+          border: 1px solid #ccc;
+          border-top: none;
+        }
+    </style>
+    <script type="text/javascript">
+        function openTab(evt, tabName) {
+          var i, tabcontent, tablinks;
+
+          // Get all elements with class="tabcontent" and hide them
+          var tabcontent = getElementsByClassName("tabcontent");
+          for (var i = 0; i < tabcontent.length; i++) {
+            tabcontent[i].style.display = "none";
+          }
+
+          // Get all elements with class="tablinks" and remove the class "active"
+          var tablinks = getElementsByClassName("tablinks");
+          for (var i = 0; i < tablinks.length; i++) {
+            tablinks[i].className = tablinks[i].className.replace(" active", "");
+          }
+
+          // Show the current tab, and add an "active" class to the button that opened the tab
+          document.getElementById(tabName).style.display = "block";
+          var target = (event.currentTarget) ? event.currentTarget : event.srcElement; 
+          target.className += " active";
+        }
+
+        /*
+            Developed by Robert Nyman, http://www.robertnyman.com
+            Code/licensing: http://code.google.com/p/getelementsbyclassname/
+        */  
+        var getElementsByClassName = function (className, tag, elm){
+            if (document.getElementsByClassName) {
+                getElementsByClassName = function (className, tag, elm) {
+                    elm = elm || document;
+                    var elements = elm.getElementsByClassName(className),
+                        nodeName = (tag)? new RegExp("\\b" + tag + "\\b", "i") : null,
+                        returnElements = [],
+                        current;
+                    for(var i=0, il=elements.length; i<il; i+=1){
+                        current = elements[i];
+                        if(!nodeName || nodeName.test(current.nodeName)) {
+                            returnElements.push(current);
+                        }
+                    }
+                    return returnElements;
+                };
+            }
+            else if (document.evaluate) {
+                getElementsByClassName = function (className, tag, elm) {
+                    tag = tag || "*";
+                    elm = elm || document;
+                    var classes = className.split(" "),
+                        classesToCheck = "",
+                        xhtmlNamespace = "http://www.w3.org/1999/xhtml",
+                        namespaceResolver = (document.documentElement.namespaceURI === xhtmlNamespace)? xhtmlNamespace : null,
+                        returnElements = [],
+                        elements,
+                        node;
+                    for(var j=0, jl=classes.length; j<jl; j+=1){
+                        classesToCheck += "[contains(concat(' ', @class, ' '), ' " + classes[j] + " ')]";
+                    }
+                    try {
+                        elements = document.evaluate(".//" + tag + classesToCheck, elm, namespaceResolver, 0, null);
+                    }
+                    catch (e) {
+                        elements = document.evaluate(".//" + tag + classesToCheck, elm, null, 0, null);
+                    }
+                    while ((node = elements.iterateNext())) {
+                        returnElements.push(node);
+                    }
+                    return returnElements;
+                };
+            }
+            else {
+                getElementsByClassName = function (className, tag, elm) {
+                    tag = tag || "*";
+                    elm = elm || document;
+                    var classes = className.split(" "),
+                        classesToCheck = [],
+                        elements = (tag === "*" && elm.all)? elm.all : elm.getElementsByTagName(tag),
+                        current,
+                        returnElements = [],
+                        match;
+                    for(var k=0, kl=classes.length; k<kl; k+=1){
+                        classesToCheck.push(new RegExp("(^|\\s)" + classes[k] + "(\\s|$)"));
+                    }
+                    for(var l=0, ll=elements.length; l<ll; l+=1){
+                        current = elements[l];
+                        match = false;
+                        for(var m=0, ml=classesToCheck.length; m<ml; m+=1){
+                            match = classesToCheck[m].test(current.className);
+                            if (!match) {
+                                break;
+                            }
+                        }
+                        if (match) {
+                            returnElements.push(current);
+                        }
+                    }
+                    return returnElements;
+                };
+            }
+            return getElementsByClassName(className, tag, elm);
+        };
+    </script>
+</head>
+<body>
+    <!-- Tab links -->
+    <div class="tab">
+      <button class="tablinks" onclick="openTab(event, 'Types')">Types</button>
+      <button class="tablinks" onclick="openTab(event, 'Functions')">Functions</button>
+    </div>
+
+    <!-- Tab content -->
+    <div id="Types" class="tabcontent">
+        <!--TYPELIST:BEGIN-->
+        <!--TYPELIST:END-->
+    </div>
+
+    <div id="Functions" class="tabcontent">
+        <!--FUNCLIST:BEGIN-->
+        <!--FUNCLIST:END-->
+    </div>
+</body>
+</html>
