@@ -39,6 +39,21 @@ ABSTRACT TYPE Object;
     |CATEGORY Entities
     ABSTRACT TYPE System : Object;
 
-        TYPE TransformSystem : System;
+        OBJECT TransformSystem : System;
 
     OBJECT App : Object;
+
+|DESCRIPTION Called when a system is initialized.
+|CATEGORY Entities
+METHOD Initialize( System )
+END;
+
+|DESCRIPTION Called when a system is updated.
+|CATEGORY Entities
+METHOD Update( System )
+END;
+
+|DESCRIPTION Called when a system is destroyed.
+|CATEGORY Entities
+METHOD Destroy( System )
+END;

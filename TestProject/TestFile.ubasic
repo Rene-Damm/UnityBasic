@@ -14,6 +14,5 @@ TYPE Next;
 TYPE Fourth;
 
 METHOD MyMethod() : INTEGER
-BEGIN
     RETURN 1234;
 END;

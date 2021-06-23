@@ -112,7 +112,7 @@ GOSCI_AddDelimiter( Scintilla, "//", "", #GOSCI_DELIMITTOENDOFLINE, #StyleCommen
 GOSCI_AddDelimiter( Scintilla, "/*", "*/", #GOSCI_DELIMITTOENDOFLINE, #StyleComment )
 GOSCI_AddDelimiter( Scintilla, ~"\"", ~"\"", #GOSCI_DELIMITBETWEEN, #StyleString )
 
-GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END RETURN", #StyleKeyword )
+GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END RETURN ABSTRACT IMMUTABLE MUTABLE", #StyleKeyword )
 GOSCI_AddKeywords( Scintilla, "|DESCRIPTION |DETAILS |COMPANY |PRODUCT |CATEGORY", #StyleAnnotation )
 
 GOSCI_SetLexerOption( Scintilla, #GOSCI_LEXEROPTION_SEPARATORSYMBOLS, @"=+-*/%()[],.;" )
@@ -444,6 +444,7 @@ Macro PushScope( Parser )
     ReDim Code\Scopes( CurrentScope + 256 )
   EndIf
   Code\ScopeCount + 1
+  Code\Scopes( CurrentScope )\FirstDefinitionOrStatement = -1
   Parser\CurrentScope = CurrentScope
   Parser\CurrentDefinitionInScope = -1
   Parser\CurrentStatement = -1
@@ -889,6 +890,62 @@ Procedure.i ParseStatement( *Parser.Parser )
   
 EndProcedure
 
+Procedure.i ParseParameterList( *Parser.Parser )
+  
+  Define.i FirstParameter = -1
+  Define.i LastParameter = -1
+  
+  While *Parser\Position < *Parser\EndPosition
+    
+    If FirstParameter <> -1
+      SkipWhitespace( *Parser )
+      If Not MatchToken( *Parser, ",", 1, #True )
+        Break
+      EndIf
+    EndIf
+    
+    Define.i Name = ParseIdentifier( *Parser )
+    Define.i Type = -1
+    
+    If Name = -1
+      Break
+    EndIf
+    
+    SkipWhitespace( *Parser )
+    If MatchToken( *Parser, ":", 1, #True )
+      Type = ParseExpression( *Parser )
+      If Type = -1
+        ;;;;TODO: add diagnostic
+        Debug "Expecting type!!"
+      EndIf
+    EndIf
+    
+    Define.i ParameterIndex = Code\ParameterCount
+    If ArraySize( Code\Parameters() ) = ParameterIndex
+      ReDim Code\Parameters( ParameterIndex + 512 )
+    EndIf
+    Code\ParameterCount + 1
+    
+    Define.Parameter *Parameter = @Code\Parameters( ParameterIndex )
+    
+    *Parameter\Name = Name
+    *Parameter\Type = Type
+    *Parameter\NextParameter = -1
+    
+    If FirstParameter = -1
+      FirstParameter = ParameterIndex
+    Else
+      Code\Parameters( LastParameter )\NextParameter = ParameterIndex
+    EndIf
+    
+    LastParameter = ParameterIndex
+    
+  Wend
+  
+  ProcedureReturn FirstParameter
+  
+EndProcedure
+
 ; Returns index of definition or -1 on failure.
 Procedure.i ParseDefinition( *Parser.Parser )
   
@@ -985,47 +1042,66 @@ Procedure.i ParseDefinition( *Parser.Parser )
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "<", 1, #True )
     
+    *Definition\FirstTypeParameter = ParseParameterList( *Parser )
     ExpectSymbol( *Parser, ">", 1 )
+    
   EndIf
   
   ; Parse value parameters.
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "(", 1, #True )
     
+    *Definition\FirstValueParameter = ParseParameterList( *Parser )
     ExpectSymbol( *Parser, ")", 1 )
+    
   EndIf
   
   ; Parse type.
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, ":", 1, #True )
-    
     *Definition\Type = ParseExpression( *Parser )
-    
   EndIf
   
   ; Parse clauses.
   
   ; Parse body.
   SkipWhitespace( *Parser )
-  If MatchToken( *Parser, "begin", 5 )
+  If Not MatchToken( *Parser, ";", 1, #True )
     
     PushScope( *Parser )
     *Definition\InnerScope = CurrentScope
     Code\Scopes( CurrentScope )\Definition = DefinitionIndex
     
+    Define.i FirstStatement = -1
+    Define.i LastStatement = -1
+    
     While *Parser\Position < *Parser\EndPosition
+      
+      SkipWhitespace( *Parser )
+      If MatchToken( *Parser, "end", 3 )
+        Break
+      EndIf
+      
       Define.i Statement = ParseStatement( *Parser )
       If Statement = -1
         Break
       EndIf
+      
+      If FirstStatement = -1
+        FirstStatement = Statement
+        Code\Scopes( CurrentScope )\FirstDefinitionOrStatement = Statement
+      Else
+        Code\Statements( LastStatement )\NextStatement = Statement
+      EndIf
+      
+      LastStatement = Statement
+      
     Wend
     
-    ExpectSymbol( *Parser, "end", 3)
     PopScope( *Parser )
+    ExpectSymbol( *Parser, ";", 1 )
     
   EndIf
-  
-  ExpectSymbol( *Parser, ";", 1 )
   
   ProcedureReturn DefinitionIndex
   
@@ -1052,7 +1128,8 @@ Procedure ParseText()
   Wend
   
   Debug( "Definitions: " + Str( Code\DefinitionCount ) + ", Expressions: " +
-         Str( Code\ExpressionCount ) + ", Statements: " + Str( Code\StatementCount ) )
+         Str( Code\ExpressionCount ) + ", Statements: " + Str( Code\StatementCount ) +
+         ", Parameters: " + Str( Code\ParameterCount ) )
   
 EndProcedure
 
@@ -1182,7 +1259,7 @@ EndProcedureUnit
 
 ProcedureUnit CanParseSimpleMethodDefinition()
   ResetCode()
-  TestParseText( @ParseDefinition(), "method First() begin return; end;", 0 )
+  TestParseText( @ParseDefinition(), "method First() return; end;", 0 )
   Assert( Code\DefinitionCount = 1 )
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\ScopeCount = 2 )
@@ -1199,6 +1276,38 @@ ProcedureUnit CanParseSimpleMethodDefinition()
   Assert( Code\Scopes( 1 )\FirstDefinitionOrStatement = 0 )
   Assert( Code\Statements( 0 )\StatementKind = #ReturnStatement )
   Assert( Code\Statements( 0 )\NextStatement = -1 )
+EndProcedureUnit
+
+ProcedureUnit CanParseMethodDefinitionWithValueParameters()
+  ResetCode()
+  TestParseText( @ParseDefinition(), "method First( A, B : C ) end;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 4 )
+  Assert( Code\ScopeCount = 2 )
+  Assert( Code\StatementCount = 0 )
+  Assert( Code\ParameterCount = 2 )
+  Assert( Code\ExpressionCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Identifiers( 1 ) = "a" )
+  Assert( Code\Identifiers( 2 ) = "b" )
+  Assert( Code\Identifiers( 3 ) = "c" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #MethodDefinition )
+  Assert( Code\Definitions( 0 )\Flags = 0 )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
+  Assert( Code\Definitions( 0 )\InnerScope = 1 )
+  Assert( Code\Definitions( 0 )\FirstValueParameter = 0 )
+  Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
+  Assert( Code\Scopes( 1 )\Definition = 0 )
+  Assert( Code\Scopes( 1 )\FirstDefinitionOrStatement = -1 )
+  Assert( Code\Parameters( 0 )\Name = 1 )
+  Assert( Code\Parameters( 0 )\NextParameter = 1 )
+  Assert( Code\Parameters( 0 )\Type = -1 )
+  Assert( Code\Parameters( 1 )\Name = 2 )
+  Assert( Code\Parameters( 1 )\NextParameter = -1 )
+  Assert( Code\Parameters( 1 )\Type = 0 )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 3 )
 EndProcedureUnit
 
 ProcedureUnit CanParseTypeDefinitionWithAnnotation()
@@ -1238,8 +1347,6 @@ ProcedureUnit CanParseSimpleProgram()
   Assert( Code\Annotations( 1 )\AnnotationText = "MyCompany" )
   Assert( Code\Annotations( 1 )\NextAnnotation = -1 )
 EndProcedureUnit
-
-CanSkipComments()
 
 ;==============================================================================
 ; Documentation.
@@ -1824,7 +1931,7 @@ EndIf
 ;[X] Can parse expressions
 ;[X] Add DOTS to Unity project
 ;[X] Can add comments
-;[ ] Methods can have value parameters
+;[X] Methods can have value parameters
 ;[ ] Can invoke methods
 ;[ ] Can have conditional branches
 ;[ ] Can have loops
@@ -1880,7 +1987,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 1825
-; FirstLine = 1785
-; Folding = -------
+; CursorPosition = 1131
+; FirstLine = 1110
+; Folding = --------
 ; EnableXP
