@@ -11,6 +11,7 @@ Global.s UnityPlayerExecutablePath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityP
 Global.s GeneratedProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
 Global.s GeneratedDocsPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Docs"
 Global.s SourceProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
+Global.s LibrariesPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Libs"
 Global.s TextFilePath = SourceProjectPath + "\TestFile" + #SOURCE_FILE_EXTENSION
 
 #SPACE = 32
@@ -940,8 +941,6 @@ EndProcedure
 
 Procedure ParseText()
   
-  ResetCode()
-  
   ;;;;TODO: preparse libraries and reset to the preparsed state here
   
   Define.Parser Parser
@@ -1205,7 +1204,7 @@ Procedure GenerateDocs()
   WriteString( TOCFile, ~"\n", #PB_UTF8 )
   For Index = 0 To Code\DefinitionCount - 1
     Define.Definition *Definition = @Code\Definitions( Index )
-    If *Definition\Type <> #TypeDefinition
+    If *Definition\DefinitionKind <> #TypeDefinition
       Continue
     EndIf
     Define.s Name = Code\Identifiers( *Definition\Name )
@@ -1218,7 +1217,7 @@ Procedure GenerateDocs()
   WriteString( TOCFile, ~"\n", #PB_UTF8 )
   For Index = 0 To Code\DefinitionCount - 1
     Define.Definition *Definition = @Code\Definitions( Index )
-    If *Definition\Type <> #MethodDefinition
+    If *Definition\DefinitionKind <> #MethodDefinition
       Continue
     EndIf
   Next
@@ -1351,7 +1350,7 @@ Procedure Collect( Map Types.GenType(), Map Fields.GenField(), Map Functions.Gen
     ;;;;TODO: probably need to ultimately mangle names here
     Define.s Name = Code\Identifiers( *Definition\Name )
     
-    Select *Definition\Type
+    Select *Definition\DefinitionKind
         
       Case #TypeDefinition
         
@@ -1423,6 +1422,7 @@ Procedure TranslateProgram()
   
   ResetStructure( @Program, Program )
   
+  ;;;;FIXME: somehow the custom product and company strings we relate aren't coming through in the player builds...
   Program\Product = "DefaultProduct"
   Program\Company = "DefaultCompany"
   
@@ -1494,19 +1494,78 @@ Procedure SendProjectSettings()
   
 EndProcedure
 
+Global.b LibrariesLoaded = #False
+Global.Code LibraryCode
+
+Procedure LoadLibraries()
+  
+  ResetCode()
+  
+  If Not LibrariesLoaded
+    
+    Define.i Directory = ExamineDirectory( #PB_Any, LibrariesPath , "*" + #SOURCE_FILE_EXTENSION )
+    If Directory
+      
+      Define *TextBefore = *Text
+      Define TextLengthBefore = TextLength
+      
+      While NextDirectoryEntry( Directory )
+        
+        Define.s Path = LibrariesPath + #PS$ + DirectoryEntryName( Directory )
+        Debug "Loading library " + Path
+        Define.i File = ReadFile( #PB_Any, Path, #PB_UTF8 | #PB_File_SharedRead )
+        Define.i Size = DirectoryEntrySize( Directory )
+        Define *Buffer = AllocateMemory( Size )
+        
+        ReadData( File, *Buffer, Size )
+        CloseFile( File )
+        *Text = *Buffer
+        TextLength = Size
+        ParseText()
+        *Text = #Null
+        TextLength = 0
+        FreeMemory( *Buffer )
+        
+      Wend
+      
+      FinishDirectory( Directory )
+      
+      *Text = *TextBefore
+      TextLength = TextLengthBefore
+      
+    EndIf
+    
+    LibrariesLoaded = #True
+    CopyStructure( @Code, @LibraryCode, Code )
+    
+  Else
+    
+    CopyStructure( @LibraryCode, @Code, Code )
+    
+  EndIf
+  
+EndProcedure
+
 Procedure UpdateProgram()
+    
+  ResetCode()
+  LoadLibraries()
   ParseText()
-  ;;;;TODO: update annotations
+  
   If Code\ErrorCount > 0
     ProcedureReturn
   EndIf
+  
   TranslateProgram()
   SendProjectSettings()
+  
   If Code\ErrorCount > 0
     ProcedureReturn
   EndIf
+  
   SendProgram()
   GenerateDocs()
+  
 EndProcedure
 
 ProcedureUnit CanCompileSimpleProgram()
@@ -1615,7 +1674,7 @@ Repeat
                         UnityStatus = #BadState
                       Else
                         UnityStatus = #WaitingForPlayerToConnect
-                        Status( "Starting player..." )
+                        Status( "Waiting for Unity player to connect..." )
                         Define.i HWND = GadgetID( PlayerContainer )
                         UnityPlayer = RunProgram( UnityPlayerExecutablePath, "-parentHWND " + Str( HWND ), "", #PB_Program_Open | #PB_Program_Read )
                       EndIf
@@ -1655,7 +1714,7 @@ EndIf
 ;[X] Program is transferred To player
 ;[X] Can parse functions
 ;[X] Can parse return statement
-;[ ] "Standard" library is automatically injected
+;[X] "Standard" library is automatically injected
 ;[ ] Can parse expressions
 ;[ ] Functions are translated
 ;[ ] Program is being run
@@ -1702,7 +1761,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 1065
-; FirstLine = 1060
+; CursorPosition = 1424
+; FirstLine = 1400
 ; Folding = -------
 ; EnableXP
