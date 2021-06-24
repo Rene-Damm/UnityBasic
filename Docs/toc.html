@@ -14,7 +14,6 @@
         /* Style the buttons that are used to open the tab content */
         .tab button {
           background-color: inherit;
-          float: left;
           border: none;
           outline: none;
           cursor: pointer;
@@ -39,6 +38,9 @@
           border: 1px solid #ccc;
           border-top: none;
         }
+
+        .main {
+        }
     </style>
     <script type="text/javascript">
         function openTab(evt, tabName) {
@@ -57,7 +59,7 @@
           }
 
           // Show the current tab, and add an "active" class to the button that opened the tab
-          document.getElementById(tabName).style.display = "block";
+          document.getElementById(tabName).style.display = "inline-block";
           var target = (event.currentTarget) ? event.currentTarget : event.srcElement; 
           target.className += " active";
         }
@@ -143,29 +145,25 @@
     </script>
 </head>
 <body>
-    <!-- Tab links -->
-    <div class="tab">
-      <button class="tablinks" onclick="openTab(event, 'Types')">Types</button>
-      <button class="tablinks" onclick="openTab(event, 'Functions')">Functions</button>
-    </div>
+    <table>
+        <tr>
+            <td style="width: 20%">
+                <!-- Tab links -->
+                <div class="tab">
+                    <button class="tablinks" onclick="openTab(event, 'Types')">Types</button>
+                    <button class="tablinks" onclick="openTab(event, 'Methods')">Methods</button>
+                </div>
 
-    <!-- Tab content -->
-    <div id="Types" class="tabcontent">
-        <ul>
-        <!--TYPELIST:BEGIN-->
-<li><a href="Types\first_type.html">first_type</a></li>
-<li><a href="Types\other_type.html">other_type</a></li>
-<li><a href="Types\next.html">next</a></li>
-<li><a href="Types\fourth.html">fourth</a></li>
-<!--TYPELIST:END-->
-  </ul>
-    </div>
+                <!-- Tab content -->
+                <div id="Types" class="tabcontent">
+                    <ul>
+                        <!--TYPES-->
+                    </ul>
+                </div>
 
-    <div id="Functions" class="tabcontent">
-        <ul>
-        <!--FUNCLIST:BEGIN-->
-<!--FUNCLIST:END-->
-  </ul>
-    </div>
-</body>
-</html>
+                <div id="Methods" class="tabcontent">
+                    <ul>
+                        <!--METHODS-->
+                    </ul>
+                </div>
+            </td>

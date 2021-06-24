@@ -4,13 +4,14 @@
 |COMPANY MyCompany
 PROGRAM FirstProgram;
 
+|CATEGORY MyShit
 TYPE FirstType;
 
 TYPE OtherType;
 
 TYPE Next;
 
-|DESCRIPTION The fourth type.
+|DESCRIPTION The fourth type!!!!
 TYPE Fourth;
 
 METHOD MyMethod() : INTEGER

@@ -5,14 +5,18 @@ IncludePath "GoScintilla/"
 XIncludeFile "GoScintilla.pbi"
 
 #SOURCE_FILE_EXTENSION = ".ubasic"
+#UNITY_SERVER_PORT = 10978
+#DOC_SERVER_PORT = 17790
 
 Global.s UnityEditorExecutablePath = "C:\Program Files\Unity\Hub\Editor\2020.3.5f1\Editor\Unity.exe"
 Global.s UnityPlayerExecutablePath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject\Builds\UnityBasic64.exe"
 Global.s GeneratedProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\UnityProject"
-Global.s GeneratedDocsPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Docs"
+Global.s GeneratedDocsPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Docs";;;;TODO: kill this
+Global.s DocsTemplatePath = "C:\Dropbox\Workspaces\UnityBasic_PB\Docs"
 Global.s SourceProjectPath = "C:\Dropbox\Workspaces\UnityBasic_PB\TestProject"
 Global.s LibrariesPath = "C:\Dropbox\Workspaces\UnityBasic_PB\Libs"
 Global.s TextFilePath = SourceProjectPath + "\TestFile" + #SOURCE_FILE_EXTENSION
+Global.s DocURL = "http://127.0.0.1:" + Str( #DOC_SERVER_PORT )
 
 #SPACE = 32
 #NEWLINE = 10
@@ -26,10 +30,19 @@ InitScintilla()
 InitNetwork()
 ExamineDesktops()
 
-Define.i Server = CreateNetworkServer( #PB_Any, 10978 )
-If Server = 0
-  Debug( "Cannot create server!!" )
-  ;;;;TODO: handle error
+; Create a server for communicating with Unity processes (both editor and player).
+Define.i UnityServer = CreateNetworkServer( #PB_Any, #UNITY_SERVER_PORT )
+If UnityServer = 0
+  Debug "Cannot create Unity server!!"
+  ;;;;TODO: error
+EndIf
+
+; Create a server for serving content to the embedded web browser (though it can be
+; accessed by any other browser just the same).
+Define.i DocServer = CreateNetworkServer( #PB_Any, #DOC_SERVER_PORT )
+If DocServer = 0
+  Debug "Cannot create doc server!!"
+  ;;;;TODO: error
 EndIf
 
 Define.i WindowWidth = DesktopUnscaledX( DesktopWidth( 0 ) )
@@ -48,7 +61,7 @@ Define.i ContentHeight = WindowHeight - StatusBarHeight( StatusBar )
 
 Global.i Scintilla = GOSCI_Create( #PB_Any, 0, 0, ContentWidth / 2, ContentHeight, 0, #GOSCI_AUTOSIZELINENUMBERSMARGIN )
 ;;;;TODO: use navigation callback or popup blocker to navigate from docs to code (put links in generated doc)
-Global.i DocViewer = WebGadget( #PB_Any, ContentWidth / 2, 0, ContentWidth / 2, ContentHeight / 2, "file:///" + ReplaceString( GeneratedDocsPath, "\", "/" ) + "/index.html" )
+Global.i DocViewer = WebGadget( #PB_Any, ContentWidth / 2, 0, ContentWidth / 2, ContentHeight / 2, DocURL )
 Global.i PlayerContainer = ContainerGadget( #PB_Any, ContentWidth / 2, ContentHeight / 2, ContentWidth / 2 , ContentHeight / 2 )
 
 ;;;;TODO: layout using splitters instead of fixed proportions
@@ -112,8 +125,8 @@ GOSCI_AddDelimiter( Scintilla, "//", "", #GOSCI_DELIMITTOENDOFLINE, #StyleCommen
 GOSCI_AddDelimiter( Scintilla, "/*", "*/", #GOSCI_DELIMITTOENDOFLINE, #StyleComment )
 GOSCI_AddDelimiter( Scintilla, ~"\"", ~"\"", #GOSCI_DELIMITBETWEEN, #StyleString )
 
-GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END RETURN ABSTRACT IMMUTABLE MUTABLE", #StyleKeyword )
-GOSCI_AddKeywords( Scintilla, "|DESCRIPTION |DETAILS |COMPANY |PRODUCT |CATEGORY", #StyleAnnotation )
+GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END RETURN ABSTRACT IMMUTABLE MUTABLE IF LOOP", #StyleKeyword )
+GOSCI_AddKeywords( Scintilla, "|DESCRIPTION |DETAILS |COMPANY |PRODUCT |CATEGORY |ICALL", #StyleAnnotation )
 
 GOSCI_SetLexerOption( Scintilla, #GOSCI_LEXEROPTION_SEPARATORSYMBOLS, @"=+-*/%()[],.;" )
 
@@ -147,6 +160,19 @@ Global *UnityNetworkBuffer = AllocateMemory( #MAX_MESSAGE_LENGTH )
 Global *UnityNetworkBufferPos
 Global.i UnityBatchSendClient
 Global.UnityProjectSettings UnityProjectSettings
+
+Procedure.s ReceiveString( Client.i )
+  
+  Define.i ReadResult = ReceiveNetworkData( EventClient(), *UnityNetworkBuffer, #MAX_MESSAGE_LENGTH )
+  If ReadResult <= 0
+    Debug "Read failure!!"
+    ProcedureReturn ""
+  EndIf
+  
+  Define.s Text = PeekS( *UnityNetworkBuffer, ReadResult, #PB_UTF8 | #PB_ByteLength )
+  ProcedureReturn Text
+                
+EndProcedure
 
 ; Sends some text to a Unity subprocess.
 Procedure SendString( Client.i, String.s )
@@ -198,7 +224,182 @@ Procedure FinishBatchSend()
 EndProcedure
 
 ;==============================================================================
+; Utilities.
 
+Procedure.i SplitString( Array Split.s( 1 ), String.s, Delimiter.s )
+  
+  Define.i DelimiterLen = Len( Delimiter )
+  Define.i StringLen = Len( String )
+  
+  Define.i Count = CountString( String, Delimiter )
+  If StringLen > DelimiterLen And FindString( String, Delimiter, StringLen + 1 - DelimiterLen ) = 0
+    Count + 1
+  EndIf
+  ReDim Split( Count )
+  
+  Define.i Index
+  Define.i Position = 1
+  For Index = 0 To Count - 1
+    Define.i EndPos = FindString( String, Delimiter, Position )
+    If EndPos = 0
+      EndPos = Len( String ) + 1
+    EndIf
+    Define.s Fragment = Mid( String, Position, EndPos - Position )
+    Split( Index ) = Fragment
+    Position = EndPos + DelimiterLen
+  Next
+  
+  ProcedureReturn Count
+  
+EndProcedure
+
+Structure StringBuilder
+  *Buffer
+  Capacity.i
+  Length.i
+EndStructure
+
+Procedure.i AppendString( *Builder.StringBuilder, String.s )
+  
+  Define.i ByteLength = StringByteLength( String, #PB_UTF8 )
+  If *Builder\Length + ByteLength > *Builder\Capacity
+    *Builder\Capacity + ByteLength + 1024
+    *Builder\Buffer = ReAllocateMemory( *Builder\Buffer, *Builder\Capacity )
+  EndIf
+  
+  Define *Ptr = *Builder\Buffer + *Builder\Length
+  PokeS( *Ptr, String, Len( String ), #PB_UTF8 | #PB_String_NoZero )
+  *Builder\Length + ByteLength
+  
+  ProcedureReturn *Ptr
+  
+EndProcedure
+
+Procedure FreeStringBuilder( *Builder.StringBuilder )
+  If *Builder\Buffer <> #Null
+    FreeMemory( *Builder\Buffer )
+  EndIf
+  *Builder\Buffer = #Null
+  *Builder\Length = 0
+  *Builder\Capacity = 0
+EndProcedure
+
+Procedure.s GetString( *Builder.StringBuilder, FreeBuilder.b = #True )
+  Define.s String
+  If *Builder\Length <> 0
+    String = PeekS( *Builder\Buffer, *Builder\Length, #PB_UTF8 | #PB_ByteLength )
+  Else
+    String = ""
+  EndIf
+  If FreeBuilder
+    FreeStringBuilder( *Builder )
+  EndIf
+  ProcedureReturn String
+EndProcedure
+
+
+;==============================================================================
+; HTTP.
+
+Enumeration HTTPMethod
+  #HTTPGet
+  #HTTPPost
+EndEnumeration
+
+Structure HTTPRequest
+  Method.i
+  Path.s
+  Map Headers.s()
+EndStructure
+
+Structure HTTPResponse
+  StatusCode.i
+  Body.s
+  Map Headers.s()
+EndStructure
+
+Procedure.b ParseHTTPRequest( Text.s, *Request.HTTPRequest )
+  
+  ResetStructure( *Request, HTTPRequest )
+  
+  Dim Lines.s( 0 )
+  SplitString( Lines(), Text, ~"\n" )
+  If ArraySize( Lines() ) < 1
+    ProcedureReturn #False
+  EndIf
+  
+  Dim Fragments.s( 0 )
+  If SplitString( Fragments(), Lines( 0 ), " " ) <> 3
+    ProcedureReturn #False
+  EndIf
+  
+  Select Fragments( 0 )
+    Case "GET"
+      *Request\Method = #HTTPGet
+    Case "POST"
+      *Request\Method = #HTTPPost
+    Default
+      *Request\Method = -1
+  EndSelect
+  
+  *Request\Path = Fragments( 1 )
+      
+  ProcedureReturn #True
+      
+EndProcedure
+
+Procedure.s HTTPStatusCodeToString( StatusCode.i )
+  Select StatusCode
+    Case 200
+      ProcedureReturn "OK"
+    Default
+      ProcedureReturn "Hmpf..."
+  EndSelect
+EndProcedure
+
+Procedure.s FormatHTTPResponse( *Response.HTTPResponse )
+  
+  Define.s Status = "HTTP/1.1 " + Str( *Response\StatusCode ) + " " + HTTPStatusCodeToString( *Response\StatusCode ) + ~"\n"
+  
+  Define.s Headers = "Content-Length: " + Len( *Response\Body ) + ~"\n"
+  ForEach *Response\Headers()
+    Define.s Value = *Response\Headers()
+    Headers + MapKey( *Response\Headers() ) + ": " + Value + ~"\n"
+  Next
+  
+  ProcedureReturn Status + Headers + ~"\n" + *Response\Body
+  
+EndProcedure
+
+ProcedureUnit CanParseSimpleHTTPRequest()
+  Define.s Text = ~"GET / HTTP/1.1\n" +
+                  ~"Host: developer.mozilla.org\n" +
+                  ~"Accept-Language: fr"
+  Define.HTTPRequest Request
+  Assert( ParseHTTPRequest( Text, @Request ) = #True )
+  Assert( Request\Method = #HTTPGet )
+  Assert( Request\Path = "/" )
+  ;;;;TODO: headers
+EndProcedureUnit
+
+ProcedureUnit CanFormatSimpleHTTPResponse()
+  Define.HTTPResponse Response
+  Response\StatusCode = 200
+  AddMapElement( Response\Headers(), "Content-Type" )
+  Response\Headers() = "text/html"
+  Response\Body = "Great!"
+  ;;;;TODO: headers
+  Define.s Expected = ~"HTTP/1.1 200 OK\n" +
+                      ~"Content-Length: 6\n" +
+                      ~"Content-Type: text/html\n" +
+                      ~"\n" +
+                      ~"Great!"
+  Assert( FormatHTTPResponse( @Response ) = Expected )
+EndProcedureUnit
+
+;==============================================================================
+  
+;;;;TODO: figure out how to deal with separate files feeding into inputs
 Structure TextRegion
   LeftPos.i
   RightPos.i
@@ -228,6 +429,9 @@ Enumeration AnnotationKind
   #CompanyAnnotation
   #ProductAnnotation
   #AssetServerAnnotation
+  
+  ; Misc annotations.
+  #IcallAnnotation
   
 EndEnumeration
 
@@ -444,6 +648,49 @@ Procedure Diagnose( DiagnosticCode.i, Index.i )
   
 EndProcedure
 
+Enumeration NamingConvention
+  #GnuCase ; foo_bar
+  #JavaCase ; fooBar
+  #PascalCase ; FooBar
+EndEnumeration
+
+Global.i DefaultNamingConvention = #PascalCase
+
+Procedure.s FormatIdentifier( Identifier.s, NamingConvention.i = -1 )
+  
+  If NamingConvention = -1
+    NamingConvention = DefaultNamingConvention
+  EndIf
+  
+  If NamingConvention = #GnuCase
+    ProcedureReturn Identifier
+  EndIf
+  
+  Dim Parts.s( 0 )
+  SplitString( Parts(), Identifier, "_" )
+  Define.i NumParts = ArraySize( Parts() )
+  
+  Define.StringBuilder Builder
+  Define.i Index
+  For Index = 0 To NumParts - 1
+    Define *Ptr = AppendString( @Builder, Parts( Index ) )
+    ; Uppercase first letter.
+    If Index <> 0 Or NamingConvention <> #JavaCase
+      PokeB( *Ptr, PeekB( *Ptr ) - ( 97 - 65 ) )
+    EndIf
+  Next
+  
+  Define.s Result = GetString( @Builder )
+  ProcedureReturn Result
+  
+EndProcedure
+
+ProcedureUnit CanFormatIdentifier()
+  Assert( FormatIdentifier( "foo_bar", #GnuCase ) = "foo_bar" )
+  Assert( FormatIdentifier( "foo_bar", #JavaCase ) = "fooBar" )
+  Assert( FormatIdentifier( "foo_bar", #PascalCase ) = "FooBar" )
+EndProcedureUnit
+
 ;==============================================================================
 ; Parser.
 ;;;;TODO: put this on a thread
@@ -490,6 +737,7 @@ Macro PushScope( Parser )
   EndIf
   Code\ScopeCount + 1
   Code\Scopes( CurrentScope )\FirstDefinitionOrStatement = -1
+  Code\Scopes( CurrentScope )\Parent = PreviousScope
   Parser\CurrentScope = CurrentScope
   Parser\CurrentDefinitionInScope = -1
   Parser\CurrentStatement = -1
@@ -1520,6 +1768,8 @@ ProcedureUnit CanParseIfStatementWithoutElse()
   Assert( Code\Expressions( 1 )\NextExpression = -1 )
 EndProcedureUnit  
 
+;;;;TODO: =============================================================
+CompilerIf #False
 ProcedureUnit CanParseIfStatementWithElse()
   ResetCode()
   TestParseText( @ParseStatement(), "if ( a ) return 123; else return 321; end;", 1 )
@@ -1559,7 +1809,8 @@ ProcedureUnit CanParseIfStatementWithElse()
   Assert( Code\Expressions( 2 )\Operator = #LiteralExpression )
   Assert( Code\Expressions( 2 )\FirstOperandI = 321 )
   Assert( Code\Expressions( 2 )\NextExpression = -1 )
-EndProcedureUnit  
+EndProcedureUnit
+CompilerEndIf
 
 ProcedureUnit CanParseAnnotation()
   ResetCode()
@@ -1709,108 +1960,6 @@ ProcedureUnit CanParseSimpleProgram()
 EndProcedureUnit
 
 ;==============================================================================
-; Documentation.
-
-;;;;TODO: support docs for language elements (just have manual tab with handwritten content?)
-
-Procedure GenerateDocs()
-  
-  ;;no... instead, host a simple webserver that dynamically generates content and have the doc viewer go there
-  
-  Define.s TypesFolder = GeneratedDocsPath + "\Types"
-  Define.s FunctionsFolder = GeneratedDocsPath + "\Functions"
-  
-  Define.s TypelistBeginMarker = "<!--TYPELIST:BEGIN-->"
-  Define.s TypelistEndMarker = "<!--TYPELIST:END-->"
-  Define.s FunclistBeginMarker = "<!--FUNCLIST:BEGIN-->"
-  Define.s FunclistEndMarker = "<!--FUNCLIST:END-->"
-  
-  ; Remove existing generated doc files.
-  DeleteDirectory( TypesFolder, "*.html" )
-  DeleteDirectory( FunctionsFolder, "*.html" )
-  CreateDirectory( TypesFolder )
-  CreateDirectory( FunctionsFolder )
-  
-  ;;;;TODO: sort alphabetically
-  ;;;;TODO: put types in inheritance hierarchy (okay if a type is mentioned more than once; or introduce groups for stuff like "A & B"?)
-  ;;;;TODO: also have a tab for assets; in fact, the browser should basically be a browsable HTML version of the project
-  ;;;;TODO: also have a tab for tests? or display the results inline as blobs on the test methods? but maybe both with the former for details?
-  
-  ; Populate TOC.
-  Define.i TOCFile = OpenFile( #PB_Any, GeneratedDocsPath + "\toc.html" )
-  Define.s TOC = ReadString( TOCFile, #PB_UTF8 | #PB_File_IgnoreEOL )
-  
-  Define.i TypelistBegin = FindString( TOC, TypelistBeginMarker )
-  Define.i TypelistEnd = FindString( TOC, TypelistEndMarker )
-  Define.i FunclistBegin = FindString( TOC, FunclistBeginMarker )
-  Define.i FunclistEnd = FindString( TOC, FunclistEndMarker )
-  
-  If TypelistBegin = 0
-    Debug "Could not find TYPELIST:BEGIN in TOC"
-    ProcedureReturn
-  EndIf
-  If TypelistEnd = 0
-    Debug "Could not find TYPELIST:END in TOC"
-    ProcedureReturn
-  EndIf
-  If FunclistBegin = 0
-    Debug "Could not find FUNCLIST:BEGIN in TOC"
-    ProcedureReturn
-  EndIf
-  If FunclistEnd = 0
-    Debug "Could not find FUNCLIST:END in TOC"
-    ProcedureReturn
-  EndIf
-  
-  TypelistEnd + Len( TypelistBeginMarker )
-  FunclistEnd + Len( FunclistEndMarker )
-  
-  Define.s Prefix = Left( TOC, TypelistBegin - 1 )
-  Define.s Midsection = Mid( TOC, TypelistEnd, FunclistBegin - TypelistEnd )
-  Define.s Suffix = Right( TOC, Len( TOC ) - FunclistEnd - 1 )
-  
-  Define.i Index
-  
-  FileSeek( TOCFile, 0 )
-  TruncateFile( TOCFile )
-  WriteString( TOCFile, Prefix, #PB_UTF8 )
-  WriteString( TOCFile, TypelistBeginMarker, #PB_UTF8 )
-  WriteString( TOCFile, ~"\n", #PB_UTF8 )
-  For Index = 0 To Code\DefinitionCount - 1
-    Define.Definition *Definition = @Code\Definitions( Index )
-    If *Definition\DefinitionKind <> #TypeDefinition
-      Continue
-    EndIf
-    Define.s Name = Code\Identifiers( *Definition\Name )
-    WriteString( TOCFile, ~"<li><a href=\"Types\\" + Name + ~".html\">" + Name + ~"</a></li>\n" )
-  Next
-  WriteString( TOCFile, TypelistEndMarker, #PB_UTF8 )
-  WriteString( TOCFile, ~"\n", #PB_UTF8 )
-  WriteString( TOCFile, Midsection, #PB_UTF8 )
-  WriteString( TOCFile, FunclistBeginMarker, #PB_UTF8 )
-  WriteString( TOCFile, ~"\n", #PB_UTF8 )
-  For Index = 0 To Code\DefinitionCount - 1
-    Define.Definition *Definition = @Code\Definitions( Index )
-    If *Definition\DefinitionKind <> #MethodDefinition
-      Continue
-    EndIf
-  Next
-  WriteString( TOCFile, FunclistEndMarker, #PB_UTF8 )
-  WriteString( TOCFile, ~"\n", #PB_UTF8 )
-  WriteString( TOCFile, Suffix, #PB_UTF8 )
-  
-  CloseFile( TOCFile )
-  
-  ; Reload browser.
-  ;;;;FIXME: blanks out the browser...
-  ;SetGadgetState( DocViewer, #PB_Web_Refresh )
-  
-EndProcedure
-
-Procedure OpenDocsForDefinition( DefinitionType.i, Name.s )
-EndProcedure
-
-;==============================================================================
 ; Code generation.
 ;;;;TODO: put this stuff on a thread
 
@@ -1841,7 +1990,8 @@ Structure Type
 EndStructure
 
 Enumeration InstructionCode
-  #CallInsn
+  #CallInsn ; Call function.
+  #ICallInsn ; Call intrinsic.
   #BranchInsn
   #JumpInsn
   #AddInsn
@@ -1886,11 +2036,11 @@ Structure Program
   TypeCount.i
   ObjectCount.i
   InstructionCount.i
-  Array Assets.Asset( 1 )
-  Array Functions.Function( 1 )
-  Array Types.Type( 1 )
-  Array Objects.Object( 1 )
-  Array Instructions.Instruction( 1 )
+  Array Assets.Asset( 0 )
+  Array Functions.Function( 0 )
+  Array Types.Type( 0 )
+  Array Objects.Object( 0 )
+  Array Instructions.Instruction( 0 )
 EndStructure
 
 ; For now, we only support a single program in source.
@@ -2045,7 +2195,7 @@ Procedure SendProgram()
   
   BatchSendString( "commit" )
   FinishBatchSend()
-  
+    
 EndProcedure
 
 Procedure SendProjectSettings()
@@ -2120,6 +2270,8 @@ Procedure LoadLibraries()
   
 EndProcedure
 
+Declare RefreshDocs()
+
 Procedure UpdateProgram()
     
   ResetCode()
@@ -2138,8 +2290,8 @@ Procedure UpdateProgram()
   EndIf
   
   SendProgram()
-  GenerateDocs()
-  
+  RefreshDocs()
+
 EndProcedure
 
 ProcedureUnit CanCompileSimpleProgram()
@@ -2153,6 +2305,271 @@ ProcedureUnit CanCompileSimpleProgram()
   Assert( Program\Types( 1 )\Name = "second_type" )
   FreeMemory( *Text )
 EndProcedureUnit
+
+;==============================================================================
+; Documentation.
+
+;;;;TODO: put this on a separate thread
+;;;;TODO: support docs for language elements (just have manual tab with handwritten content?)
+;;;;TODO: add tab for assets
+
+Global.b TemplatesLoaded = #False
+Global.s TOCTemplate
+Global.b TOCNeedsToBeRegenerated = #True
+Global.s TOC
+
+#TOC_TYPE_LIST_MARKER = "<!--TYPES-->"
+#TOC_METHOD_LIST_MARKER = "<!--METHODS-->"
+
+#UNCATEGORIZED = "<Uncategorized>"
+
+Procedure LoadDocTemplates()
+  
+  If TemplatesLoaded
+    ProcedureReturn
+  EndIf
+  
+  Define.i TOCFile = ReadFile( #PB_Any, GeneratedDocsPath + "\toc.html" )
+  TOCTemplate = ReadString( TOCFile, #PB_UTF8 | #PB_File_IgnoreEOL )
+  CloseFile( TOCFile )
+  
+  TemplatesLoaded = #True
+  
+EndProcedure
+
+Structure Category
+  List Entries.s()
+EndStructure
+
+;;;;FIXME: using characters in category names that need to be HTML entities will lead to HTML errors
+
+Procedure AddDefinitionToCategory( *Definition.Definition, Category.s, Map TypeCategories.Category(), Map MethodCategories.Category() )
+  
+  Define *Category.Category
+  ;;;;REVIEW: how should we handle fields here? add them to methods?
+  Select *Definition\DefinitionKind
+      
+    Case #TypeDefinition
+      *Category = FindMapElement( TypeCategories(), Category )
+      If *Category = #Null
+        *Category = AddMapElement( TypeCategories(), Category )
+      EndIf
+      
+    Case #MethodDefinition
+      *Category = FindMapElement( MethodCategories(), Category )
+      If *Category = #Null
+        *Category = AddMapElement( MethodCategories(), Category )
+      EndIf
+      
+    Default
+      ProcedureReturn
+      
+  EndSelect
+  
+  AddElement( *Category\Entries() )
+  *Category\Entries() = Code\Identifiers( *Definition\Name )
+  
+EndProcedure
+
+Procedure CollectCategories( Map TypeCategories.Category(), Map MethodCategories.Category() )
+  
+  ;;;;TODO: fold this into the parsing pass
+  
+  If Code\DefinitionCount = 0
+    ProcedureReturn
+  EndIf
+  
+  Define.i DefinitionIndex
+  For DefinitionIndex = 0 To Code\DefinitionCount - 1
+    
+    Define *Definition.Definition = @Code\Definitions( DefinitionIndex )
+    
+    Define.b IsCategorized = #False
+    Define.i AnnotationIndex = *Definition\FirstAnnotation
+    While AnnotationIndex <> -1
+      ;;;;TODO: look for asset annotations
+      Define *Annotation.Annotation = @Code\Annotations( AnnotationIndex )
+      If *Annotation\AnnotationKind = #CategoryAnnotation
+        IsCategorized = #True
+        Define.s CategoryName = Trim( *Annotation\AnnotationText )
+        AddDefinitionToCategory( *Definition, CategoryName, TypeCategories(), MethodCategories() )
+      EndIf
+      AnnotationIndex = *Annotation\NextAnnotation
+    Wend
+    
+    If Not IsCategorized
+      AddDefinitionToCategory( *Definition, #UNCATEGORIZED, TypeCategories(), MethodCategories() )
+    EndIf
+    
+  Next
+  
+  ForEach TypeCategories()
+    SortList( TypeCategories()\Entries(), #PB_Sort_Ascending | #PB_Sort_NoCase )
+  Next
+  ForEach MethodCategories()
+    SortList( MethodCategories()\Entries(), #PB_Sort_Ascending | #PB_Sort_NoCase )
+  Next
+
+EndProcedure
+
+Procedure AddCategory( Path.s, *Builder.StringBuilder, Map Categories.Category() )
+  
+  ;;;;TODO: automatically indent types based on their derivation
+  
+  Define.s Category = MapKey( Categories() )
+  
+  If Category <> #UNCATEGORIZED
+    AppendString( *Builder, "<li><p>" )
+    AppendString( *Builder, MapKey( Categories() ) )
+    AppendString( *Builder, "<p><ul>" )
+  EndIf
+  
+  ForEach Categories()\Entries()
+    AppendString( *Builder, ~"<li><a href=\"" )
+    AppendString( *Builder, DocURL )
+    AppendString( *Builder, Path )
+    AppendString( *Builder, Categories()\Entries() )
+    AppendString( *Builder, ~"\">" )
+    AppendString( *Builder, FormatIdentifier( Categories()\Entries() ) )
+    AppendString( *Builder, "</a></li>" )
+  Next
+  
+  If Category <> ""
+    AppendString( *Builder, "</ul></li>" )
+  EndIf
+  
+EndProcedure
+
+Procedure.s GenerateTOCList( Path.s, Map Categories.Category() )
+  
+  Define.StringBuilder Builder
+  
+  ; Add uncategorized first.
+  If FindMapElement( Categories(), #UNCATEGORIZED )
+    AddCategory( Path, @Builder, Categories() )
+  EndIf
+  
+  ; Add categorized.
+  ForEach Categories()
+    If MapKey( Categories() ) = #UNCATEGORIZED
+      Continue
+    EndIf
+    AddCategory( Path, @Builder, Categories() )
+  Next
+  
+  ProcedureReturn GetString( @Builder )
+  
+EndProcedure
+
+Procedure GenerateTableOfContents()
+  
+  NewMap TypeCategories.Category()
+  NewMap MethodCategories.Category()
+  
+  CollectCategories( TypeCategories(), MethodCategories() )
+  
+  Define.s TypeList = GenerateTOCList( "/types/", TypeCategories() )
+  Define.s MethodList = GenerateTOCList( "/methods/", MethodCategories() )
+  
+  TOC = ReplaceString( TOCTemplate, #TOC_TYPE_LIST_MARKER, TypeList )
+  TOC = ReplaceString( TOC, #TOC_METHOD_LIST_MARKER, MethodList )
+  
+  TOCNeedsToBeRegenerated = #False
+  
+EndProcedure
+
+Procedure GenerateDocsForDefinition( DefinitionKind.i, Name.s, *Builder.StringBuilder )
+  
+  Define.i DefinitionIndex
+  For DefinitionIndex = 0 To Code\DefinitionCount - 1
+    
+    ;;;;TODO: proper (fast) lookup using a map
+    Define.Definition *Definition = @Code\Definitions( DefinitionIndex )
+    If *Definition\DefinitionKind <> DefinitionKind
+      Continue
+    EndIf
+    
+    If Code\Identifiers( *Definition\Name ) <> Name
+      Continue
+    EndIf
+    
+    Define.i AnnotationIndex = *Definition\FirstAnnotation
+    While AnnotationIndex <> -1
+      
+      Define.Annotation *Annotation = @Code\Annotations( AnnotationIndex )
+      
+      ;;;;TODO: allow multiple of each annotation and treat them like line continuations (and empty annotation is new paragraph)
+      
+      Select *Annotation\AnnotationKind
+          
+        Case #DescriptionAnnotation
+          AppendString( *Builder, "<h3>Description</h3><p>" )
+          AppendString( *Builder, *Annotation\AnnotationText )
+          AppendString( *Builder, "</p>" )
+          
+      EndSelect
+      
+      AnnotationIndex = *Annotation\NextAnnotation
+      
+    Wend
+    
+  Next
+  
+EndProcedure
+
+Procedure.s GenerateDocsAt( Path.s )
+  
+  LoadDocTemplates()
+  
+  Dim Parts.s( 0 )
+  SplitString( Parts(), Path, "/" )
+  
+  If TOCNeedsToBeRegenerated
+    GenerateTableOfContents()
+  EndIf
+  
+  Define.StringBuilder Builder
+  
+  AppendString( @Builder, TOC )
+  AppendString( @Builder, ~"<td style=\"width: 80%;\"><div class=\"main\">" )
+  
+  Select ArraySize( Parts() )
+      
+      ; Index #0 should always be the root '/'.
+    Case 0
+    Case 1
+      AppendString( @Builder, "<p>Welcome to UnityBasic!</p>" )
+      
+    Case 2
+      
+    Default
+      Select Parts( 1 )
+        Case "types"
+          GenerateDocsForDefinition( #TypeDefinition, Parts( 2 ), @Builder )
+        Case "methods"
+          GenerateDocsForDefinition( #MethodDefinition, Parts( 2 ), @Builder )
+      EndSelect
+      
+  EndSelect
+  
+  AppendString( @Builder, "</div></td></tr></table></body></html>" )
+  
+  ProcedureReturn GetString( @Builder )
+  
+EndProcedure
+
+Procedure RefreshDocs()
+  
+  ; Refresh doc view.
+  TOCNeedsToBeRegenerated = #True
+  Define.s URL = GetGadgetText( DocViewer )
+  SetGadgetText( DocViewer, URL )
+  ;SetGadgetState( DocViewer, #PB_Web_Refresh )
+  
+EndProcedure
+
+Procedure OpenDocsForDefinition( DefinitionType.i, Name.s )
+EndProcedure
 
 ;==============================================================================
 
@@ -2201,7 +2618,7 @@ Repeat
           FlushText()
           
         Case #WINDOW_NETWORK_TIMER
-          Select NetworkServerEvent( Server )
+          Select NetworkServerEvent( UnityServer )
             Case #PB_NetworkEvent_Connect
               Select UnityStatus
                   
@@ -2232,30 +2649,55 @@ Repeat
               EndIf
               
             Case #PB_NetworkEvent_Data
-              Define.i ReadResult = ReceiveNetworkData( EventClient(), *UnityNetworkBuffer, #MAX_MESSAGE_LENGTH )
-              If ReadResult <= 0
-                Debug "Read failure!!"
-              Else
-                Define.s Text = PeekS( *UnityNetworkBuffer, ReadResult, #PB_UTF8 | #PB_ByteLength )
-                Debug "Data " + Text
-                Select UnityStatus
-                    
-                  Case #WaitingForEditorToBuildPlayer
-                    If EventClient() = UnityEditorClient
-                      If Text = "build failure"
-                        ;;;;TODO: handle failure
-                        Status( "Build failed!" )
-                        UnityStatus = #BadState
-                      Else
-                        UnityStatus = #WaitingForPlayerToConnect
-                        Status( "Waiting for Unity player to connect..." )
-                        Define.i HWND = GadgetID( PlayerContainer )
-                        UnityPlayer = RunProgram( UnityPlayerExecutablePath, "-parentHWND " + Str( HWND ), "", #PB_Program_Open | #PB_Program_Read )
-                      EndIf
+              Define.s Text = ReceiveString( EventClient() )
+              Debug "Data " + Text
+              Select UnityStatus
+                  
+                Case #WaitingForEditorToBuildPlayer
+                  If EventClient() = UnityEditorClient
+                    If Text = "build failure"
+                      ;;;;TODO: handle failure
+                      Status( "Build failed!" )
+                      UnityStatus = #BadState
+                    Else
+                      UnityStatus = #WaitingForPlayerToConnect
+                      Status( "Waiting for Unity player to connect..." )
+                      Define.i HWND = GadgetID( PlayerContainer )
+                      UnityPlayer = RunProgram( UnityPlayerExecutablePath, "-parentHWND " + Str( HWND ), "", #PB_Program_Open | #PB_Program_Read )
                     EndIf
+                  EndIf
                     
-                EndSelect
-              EndIf
+              EndSelect
+          EndSelect
+          
+          Select NetworkServerEvent( DocServer )
+              
+            Case #PB_NetworkEvent_Connect
+              Debug "Doc client connected"
+              
+            Case #PB_NetworkEvent_Disconnect
+              Debug "Doc client disconnected"
+              
+            Case #PB_NetworkEvent_Data
+              Debug "Doc client asking for stuff"
+              
+              ; Parse request.
+              Define.s Text = ReceiveString( EventClient() )
+              Define.HTTPRequest Request
+              ParseHTTPRequest( Text, @Request )
+              
+              ; Generate content.
+              Define.s Content = GenerateDocsAt( Request\Path )
+              
+              ; Build response.
+              Define.HTTPResponse Response
+              Response\StatusCode = 200
+              Response\Body = Content
+              AddMapElement( Response\Headers(), "Content-Type" )
+              Response\Headers() = "text/html"
+              Text = FormatHTTPResponse( @Response )
+              SendNetworkString( EventClient(), Text, #PB_UTF8 )
+              
           EndSelect
       EndSelect
   EndIf
@@ -2316,7 +2758,7 @@ EndIf
 
 ;[ ] Dark theme for text editor
 ;[ ] Diagnostics are shown as annotations on code
-;[ ] Can generate docs from code
+;[X] Can generate docs from code
 ;[ ] Can jump to docs by pressing F1
 ;[ ] Can jump to definition by pressing F2
 ;[ ] Can jump to definition by opening goto popup
@@ -2331,6 +2773,7 @@ EndIf
 
 ; Optimizations
 ; - Make a pass over the structs and make them more compact (indices can be 32bit, for example)
+; - Instead of just plain arrays, have chunked/segmented arrays where the whole array does not need to be re-allocated and segments can be allocated in pages
 
 ; What I want
 ; - All tests are being run continuously on all connected players (smart execution to narrow down run sets)
@@ -2349,7 +2792,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 1089
-; FirstLine = 1058
-; Folding = ----------
+; CursorPosition = 2760
+; FirstLine = 2727
+; Folding = -------------
 ; EnableXP
