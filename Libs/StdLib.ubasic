@@ -14,10 +14,14 @@ ABSTRACT TYPE Object;
             MUTABLE TYPE MutableString : String;
             IMMUTABLE TYPE ImmutableString : String;
 
-        ABSTRACT TYPE Boolean : Literal;
+        |DESCRIPTION The universal value for 'true'.
+        IMMUTABLE OBJECT True : Literal;
 
-            IMMUTABLE OBJECT True : Boolean;
-            IMMUTABLE OBJECT False : Boolean;
+        |DESCRIPTION The universal value for 'false'.
+        IMMUTABLE OBJECT False : Literal;
+
+        |DESCRIPTION A truth value.
+        TYPE Boolean = True | False;
 
     |CATEGORY Assets
     ABSTRACT TYPE Asset : Object;
@@ -44,16 +48,16 @@ ABSTRACT TYPE Object;
     OBJECT App : Object;
 
 |DESCRIPTION Called when a system is initialized.
-|CATEGORY Entities
+|CATEGORY Systems
 METHOD Initialize( System )
 END;
 
 |DESCRIPTION Called when a system is updated.
-|CATEGORY Entities
+|CATEGORY Systems
 METHOD Update( System )
 END;
 
 |DESCRIPTION Called when a system is destroyed.
-|CATEGORY Entities
+|CATEGORY Systems
 METHOD Destroy( System )
 END;

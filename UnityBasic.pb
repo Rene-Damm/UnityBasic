@@ -469,9 +469,9 @@ EndEnumeration
 Enumeration Operator
   #LiteralExpression = 1
   #NameExpression
-  #LogicalAndExpression
-  #LogicalOrExpression
-  #LogicalNotExpression
+  #AndExpression
+  #OrExpression
+  #NotExpression
   #BitwiseAndExpression
   #BitwiseOrExpression
   #ApplyExpression ; For types, this instantiates the given named type.
@@ -541,11 +541,12 @@ EnumerationBinary DefinitionFlags
   #IsExtend
   #IsReplace
   #IsIterator
+  #IsAlias ; for '=' type definitions.
 EndEnumeration
 
 Structure Parameter
   Name.i
-  Type.i
+  TypeExpression.i
   DefaultExpression.i ; -1 if none.
   NextParameter.i
 EndStructure
@@ -555,7 +556,7 @@ Structure Definition
   Scope.i
   DefinitionKind.i
   Flags.i
-  Type.i
+  TypeExpression.i
   InnerScope.i
   Region.TextRegion
   NextDefinition.i
@@ -1268,6 +1269,7 @@ Procedure.i ParseUnaryPostfixExpression( *Parser.Parser )
     ProcedureReturn -1
   EndIf
   
+  ;;;;REVIEW: should this be considered a binary expression instead?
   ; ATM we allow only parenthesized and tuple expressions to form apply expressions.
   ; With a more powerful parser, that could be changed but there's a lot of ambiguity
   ; that needs to be figured out on that path.
@@ -1292,7 +1294,7 @@ Procedure.i ParseUnaryPrefixExpression( *Parser.Parser )
   Define.i LeftPos = *Parser\Position - *Parser\StartPosition
   Define.i PrefixOperator = -1
   If MatchToken( *Parser, "!", 1, #True )
-    PrefixOperator = #LogicalNotExpression
+    PrefixOperator = #NotExpression
   EndIf
   
   Define.i Expression = ParseUnaryPostfixExpression( *Parser )
@@ -1307,9 +1309,56 @@ Procedure.i ParseUnaryPrefixExpression( *Parser.Parser )
 EndProcedure
 
 Procedure.i ParseBinaryExpression( *Parser.Parser )
-  Define.i Left = ParseUnaryPrefixExpression( *Parser )
-  ;;;;TODO
-  ProcedureReturn Left
+  
+  Define.i Expression = ParseUnaryPrefixExpression( *Parser )
+  
+  SkipWhitespace( *Parser )
+  
+  Define.i Operator = -1
+  
+  If *Parser\CurrentExpressionContext = #ValueContext
+    If MatchToken( *Parser, "&&", 2, #True )
+      Operator = #AndExpression
+    ElseIf MatchToken( *Parser, "||", 2, #True )
+      Operator = #OrExpression
+    EndIf
+  EndIf
+  
+  If Operator = -1
+    
+    If MatchToken( *Parser, "&", 1, #True )
+      
+      If *Parser\CurrentExpressionContext = #TypeContext
+        Operator = #AndExpression
+      Else
+        Operator = #BitwiseAndExpression
+      EndIf
+      
+    ElseIf MatchToken( *Parser, "|", 1, #True )
+      
+      If *Parser\CurrentExpressionContext = #TypeContext
+        Operator = #OrExpression
+      Else
+        Operator = #BitwiseOrExpression
+      EndIf
+      
+    EndIf
+    
+  EndIf
+  
+  ;;;;TODO: deal with left/right association properly
+  
+  If Operator <> -1
+    
+    Define.i RightExpression = ParseExpression( *Parser )
+    
+    MakeExpressionOp2I( BinaryExpression, Operator, -1, Expression, RightExpression, Code\Expressions( Expression )\Region\LeftPos )
+    Expression = BinaryExpression
+    
+  EndIf
+
+  ProcedureReturn Expression
+  
 EndProcedure
 
 Procedure.i ParseExpression( *Parser.Parser )
@@ -1425,7 +1474,7 @@ Procedure.i ParseParameterList( *Parser.Parser )
     EndIf
     
     Define.i Name = ParseIdentifier( *Parser )
-    Define.i Type = -1
+    Define.i TypeExpression = -1
     
     If Name = -1
       Break
@@ -1434,8 +1483,8 @@ Procedure.i ParseParameterList( *Parser.Parser )
     SkipWhitespace( *Parser )
     If MatchToken( *Parser, ":", 1, #True )
       PushExpressionContext( *Parser, #TypeContext )
-      Type = ParseExpression( *Parser )
-      If Type = -1
+      TypeExpression = ParseExpression( *Parser )
+      If TypeExpression = -1
         ;;;;TODO: add diagnostic
         Debug "Expecting type!!"
       EndIf
@@ -1451,7 +1500,7 @@ Procedure.i ParseParameterList( *Parser.Parser )
     Define.Parameter *Parameter = @Code\Parameters( ParameterIndex )
     
     *Parameter\Name = Name
-    *Parameter\Type = Type
+    *Parameter\TypeExpression = TypeExpression
     *Parameter\NextParameter = -1
     
     If FirstParameter = -1
@@ -1541,7 +1590,7 @@ Procedure.i ParseDefinition( *Parser.Parser )
   Define *Definition.Definition = @Code\Definitions( DefinitionIndex )
   *Definition\Flags = Flags
   *Definition\Name = Name
-  *Definition\Type = -1
+  *Definition\TypeExpression = -1
   *Definition\DefinitionKind = Kind
   *Definition\NextDefinition = -1
   *Definition\InnerScope = -1
@@ -1585,7 +1634,12 @@ Procedure.i ParseDefinition( *Parser.Parser )
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, ":", 1, #True )
     PushExpressionContext( *Parser, #TypeContext )
-    *Definition\Type = ParseExpression( *Parser )
+    *Definition\TypeExpression = ParseExpression( *Parser )
+    PopExpressionContext( *Parser )
+  ElseIf MatchToken( *Parser, "=", 1, #True )
+    PushExpressionContext( *Parser, #TypeContext )
+    *Definition\TypeExpression = ParseExpression( *Parser )
+    *Definition\Flags | #IsAlias
     PopExpressionContext( *Parser )
   EndIf
   
@@ -1862,10 +1916,38 @@ ProcedureUnit CanParseDerivedTypeDefinition()
   Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
   Assert( Code\Definitions( 0 )\FirstValueParameter = -1 )
   Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
-  Assert( Code\Definitions( 0 )\Type = 0 )
+  Assert( Code\Definitions( 0 )\TypeExpression = 0 )
   Assert( Code\Expressions( 0 )\Operator = #NameExpression )
   Assert( Code\Expressions( 0 )\Context = #TypeContext )
   Assert( Code\Expressions( 0 )\FirstOperandI = 1 )
+EndProcedureUnit
+
+ProcedureUnit CanParseTypeAliasDefinition()
+  ResetCode()
+  TestParseText( @ParseDefinition(), "type First = A | B;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 3 )
+  Assert( Code\ExpressionCount = 3 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Identifiers( 1 ) = "a" )
+  Assert( Code\Identifiers( 2 ) = "b" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #TypeDefinition )
+  Assert( Code\Definitions( 0 )\Flags = #IsAlias )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
+  Assert( Code\Definitions( 0 )\FirstValueParameter = -1 )
+  Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
+  Assert( Code\Definitions( 0 )\TypeExpression = 2 )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\Context = #TypeContext )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 1 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 1 )\Context = #TypeContext )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 2 )
+  Assert( Code\Expressions( 2 )\Operator = #OrExpression )
+  Assert( Code\Expressions( 2 )\Context = #TypeContext )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 2 )\SecondOperandI = 1 )
 EndProcedureUnit
 
 ProcedureUnit CanParseEmptyMethodDefinition()
@@ -1928,10 +2010,10 @@ ProcedureUnit CanParseMethodDefinitionWithValueParameters()
   Assert( Code\Scopes( 1 )\FirstDefinitionOrStatement = -1 )
   Assert( Code\Parameters( 0 )\Name = 1 )
   Assert( Code\Parameters( 0 )\NextParameter = 1 )
-  Assert( Code\Parameters( 0 )\Type = -1 )
+  Assert( Code\Parameters( 0 )\TypeExpression = -1 )
   Assert( Code\Parameters( 1 )\Name = 2 )
   Assert( Code\Parameters( 1 )\NextParameter = -1 )
-  Assert( Code\Parameters( 1 )\Type = 0 )
+  Assert( Code\Parameters( 1 )\TypeExpression = 0 )
   Assert( Code\Expressions( 0 )\Operator = #NameExpression )
   Assert( Code\Expressions( 0 )\FirstOperandI = 3 )
   Assert( Code\Expressions( 0 )\Context = #TypeContext )
@@ -2137,8 +2219,11 @@ Structure GenMethod
   DefinitionIndex.i
   MethodFlags.i
   ArgumentType.i
+  ResultType.i
 EndStructure
 
+; A collection of methods that all have the same name.
+; Essentially, each function is an 'Object -> Object' mapping.
 Structure GenFunction
   Name.s
   MethodCount.i
@@ -2186,17 +2271,13 @@ Macro SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
 EndMacro
 
 Procedure.b FirstIsSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
-  
   SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
   ProcedureReturn Bool( ( PeekB( *SubtypeMatrixPtr ) & SubtypeMatrixMask ) <> 0 )
-  
 EndProcedure
 
 Procedure.b SetFirstIsSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
-  
   SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
   PokeB( *SubtypeMatrixPtr, PeekB( *SubtypeMatrixPtr ) | SubtypeMatrixMask )
-  
 EndProcedure
 
 ;;;;TODO: would be more efficient to fold this into the parsing pass
@@ -2251,6 +2332,25 @@ Procedure GenCollect()
             GenProgram\TypeTable\ImmutableStringTypeId = TypeId
             
         EndSelect
+        
+      Case #MethodDefinition
+        
+        ; Make sure the function is defined.
+        Define.GenFunction *GenFunction = FindMapElement( GenProgram\FunctionTable\Functions(), Name )
+        If *GenFunction = #Null
+          *GenFunction = AddMapElement( GenProgram\FunctionTable\Functions(), Name )
+          *GenFunction\Name = Name
+        EndIf
+        
+        ; Add the method to the function.
+        Define.i MethodIndex = *GenFunction\MethodCount
+        If ArraySize( *GenFunction\Methods() ) = MethodIndex
+          ReDim *GenFunction\Methods( MethodIndex + 32 )
+        EndIf
+        *GenFunction\MethodCount + 1
+        
+        Define.GenMethod *GenMethod = @*GenFunction\Methods( MethodIndex )
+        *GenMethod\DefinitionIndex = DefinitionIndex
         
       Case #ProgramDefinition
         
@@ -2328,7 +2428,7 @@ Procedure GenTypes()
     SetFirstIsSubtypeOfSecond( *GenType\Id, *GenType\Id ) ; Every type is a subtype of itself.
     If *GenType\TypeKind = #NamedType
       Define.Definition *Definition = @Code\Definitions( *GenType\DefinitionIndex )
-      Define.i TypeExpressionIndex = *Definition\Type
+      Define.i TypeExpressionIndex = *Definition\TypeExpression
       
       Define.i IdOfTypeDerivedFrom = ObjectTypeId
       If TypeExpressionIndex <> -1
@@ -3072,7 +3172,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 2378
-; FirstLine = 2365
+; CursorPosition = 1946
+; FirstLine = 1899
 ; Folding = --------------
 ; EnableXP
