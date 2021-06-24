@@ -11,7 +11,7 @@ TYPE OtherType;
 
 TYPE Next;
 
-|DESCRIPTION The fourth type!!!!
+|DESCRIPTION The fourth type!!
 TYPE Fourth;
 
 METHOD MyMethod() : INTEGER

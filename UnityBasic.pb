@@ -457,30 +457,17 @@ Structure Clause
   NextClause.i
 EndStructure
 
-CompilerIf #False
-Enumeration TypeKind
-  #NamedType  
-  #PrimitiveType
-  #DerivedType
-  #UnionType
-  #IntersectionType
-  #InstancedType
-  #TupleType
-  #DependentType
-EndEnumeration
-CompilerEndIf
-
-; -1 is invalid index. Further negative values are "built-in" types, i.e. types for
+; -1 is invalid index. Further negative values are "built-in" types for literals, i.e. types for
 ; which literal values exist. Note that Boolean isn't among them -- True and False are singletons.
-Enumeration BuiltinType
-  #IntegerType = -2
-  #FloatType = -3
-  #ImmutableStringType = -4
-  #MutableStringType = -5
+; During compilation, these are replaced with actual type IDs.
+Enumeration LiteralType
+  #IntegerLiteralType = -2
+  #FloatLiteralType = -3
+  #StringLiteralType = -4
 EndEnumeration
 
 Enumeration Operator
-  #LiteralExpression
+  #LiteralExpression = 1
   #NameExpression
   #LogicalAndExpression
   #LogicalOrExpression
@@ -491,10 +478,16 @@ Enumeration Operator
   #TupleExpression
 EndEnumeration
 
+Enumeration ExpressionContext
+  #ValueContext
+  #TypeContext
+EndEnumeration
+
 ; Type and value expressions use the same data format.
 ; All expressions are either unary or binary.
 Structure Expression
-  Operator.i
+  Operator.b
+  Context.b
   Type.i
   Region.TextRegion
   StructureUnion
@@ -690,15 +683,23 @@ ProcedureUnit CanFormatIdentifier()
   Assert( FormatIdentifier( "foo_bar", #JavaCase ) = "fooBar" )
   Assert( FormatIdentifier( "foo_bar", #PascalCase ) = "FooBar" )
 EndProcedureUnit
+  
+Procedure.s DefinitionKindToString( DefinitionKind.i )
+  Select DefinitionKind
+    Case #TypeDefinition
+      ProcedureReturn "Type"
+    Case #MethodDefinition
+      ProcedureReturn "Method"
+    Case #ProgramDefinition
+      ProcedureReturn "Program"
+    Default
+      ProcedureReturn "???"
+  EndSelect
+EndProcedure
 
 ;==============================================================================
 ; Parser.
 ;;;;TODO: put this on a thread
-
-Enumeration ParserContext
-  #ValueContext
-  #TypeContext
-EndEnumeration
 
 Structure Parser
   *Position
@@ -713,17 +714,17 @@ Structure Parser
   CurrentScope.i
   CurrentDefinitionInScope.i
   CurrentStatement.i
-  CurrentContext.i
+  CurrentExpressionContext.i
   ;store failure state here; func to reset
 EndStructure
 
-Macro PushContext( Parser, Context )
-  Define.i PreviousContext = Parser\CurrentContext
-  Parser\CurrentContext = Context
+Macro PushExpressionContext( Parser, Context )
+  Define.i PreviousExpressionContext = Parser\CurrentExpressionContext
+  Parser\CurrentExpressionContext = Context
 EndMacro
 
-Macro PopContext( Parser )
-  Parser\CurrentContext = PreviousContext
+Macro PopExpressionContext( Parser )
+  Parser\CurrentExpressionContext = PreviousExpressionContext
 EndMacro
 
 Macro PushScope( Parser )
@@ -763,6 +764,7 @@ Macro MakeExpressionOpI( IndexVariable, Op, Tp, Operand, StartPos )
   
   Define.Expression *Expression = @Code\Expressions( IndexVariable )
   *Expression\Operator = Op
+  *Expression\Context = *Parser\CurrentExpressionContext
   *Expression\Type = Tp
   *Expression\FirstOperandI = Operand
   *Expression\Region\LeftPos = StartPos
@@ -781,6 +783,7 @@ Macro MakeExpressionOp2I( IndexVariable, Op, Tp, Operand1, Operand2, StartPos )
   
   Define.Expression *Expression = @Code\Expressions( IndexVariable )
   *Expression\Operator = Op
+  *Expression\Context = *Parser\CurrentExpressionContext
   *Expression\Type = Tp
   *Expression\FirstOperandI = Operand1
   *Expression\SecondOperandI = Operand2
@@ -933,7 +936,7 @@ Procedure.b NextCharIsListBegin( *Parser.Parser )
   SkipWhitespace( *Parser )
   If *Parser\Position < *Parser\EndPosition
     Define.c Char = PeekB( *Parser\Position ) 
-    If *Parser\CurrentContext = #ValueContext
+    If *Parser\CurrentExpressionContext = #ValueContext
       ProcedureReturn Bool( Char = '(' )
     Else
       ProcedureReturn Bool( Char = '<' )
@@ -1193,6 +1196,7 @@ Procedure.i ParseBasicExpression( *Parser.Parser )
     ;;;;TODO: float literals
     ;;;;TODO: integer size suffixes
     
+    Type = #IntegerLiteralType
     FirstOperandI = IntegerPart
     
   ElseIf IsAlpha( Char ) Or Char = '_'
@@ -1429,11 +1433,13 @@ Procedure.i ParseParameterList( *Parser.Parser )
     
     SkipWhitespace( *Parser )
     If MatchToken( *Parser, ":", 1, #True )
+      PushExpressionContext( *Parser, #TypeContext )
       Type = ParseExpression( *Parser )
       If Type = -1
         ;;;;TODO: add diagnostic
         Debug "Expecting type!!"
       EndIf
+      PopExpressionContext( *Parser )
     EndIf
     
     Define.i ParameterIndex = Code\ParameterCount
@@ -1535,6 +1541,7 @@ Procedure.i ParseDefinition( *Parser.Parser )
   Define *Definition.Definition = @Code\Definitions( DefinitionIndex )
   *Definition\Flags = Flags
   *Definition\Name = Name
+  *Definition\Type = -1
   *Definition\DefinitionKind = Kind
   *Definition\NextDefinition = -1
   *Definition\InnerScope = -1
@@ -1558,7 +1565,9 @@ Procedure.i ParseDefinition( *Parser.Parser )
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, "<", 1, #True )
     
+    PushExpressionContext( *Parser, #TypeContext )
     *Definition\FirstTypeParameter = ParseParameterList( *Parser )
+    PopExpressionContext( *Parser )
     ExpectSymbol( *Parser, ">", 1 )
     
   EndIf
@@ -1575,7 +1584,9 @@ Procedure.i ParseDefinition( *Parser.Parser )
   ; Parse type.
   SkipWhitespace( *Parser )
   If MatchToken( *Parser, ":", 1, #True )
+    PushExpressionContext( *Parser, #TypeContext )
     *Definition\Type = ParseExpression( *Parser )
+    PopExpressionContext( *Parser )
   EndIf
   
   ; Parse clauses.
@@ -1602,7 +1613,7 @@ Procedure ParseText()
   Parser\CurrentStatement = -1
   Parser\CurrentLine = 1
   Parser\CurrentColumn = 1
-  Parser\CurrentContext = #ValueContext
+  Parser\CurrentExpressionContext = #ValueContext
   
   While Parser\Position < Parser\EndPosition
     If ParseDefinition( @Parser ) = -1
@@ -1630,7 +1641,7 @@ Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
   Parser\CurrentStatement = -1
   Parser\CurrentLine = 1
   Parser\CurrentColumn = 1
-  Parser\CurrentContext = #ValueContext
+  Parser\CurrentExpressionContext = #ValueContext
   Assert( Fn( @Parser ) = Expected )
   FreeMemory( *Buffer )
 EndProcedure
@@ -1666,12 +1677,13 @@ ProcedureUnit CanParseIdentifier()
   Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foo_bar" ) ) = 0 )
 EndProcedureUnit
 
-ProcedureUnit CanParseLiteralExpression()
+ProcedureUnit CanParseIntegerLiteralExpression()
   ResetCode()
   TestParseText( @ParseExpression(), "01234", 0 )
   Assert( Code\ExpressionCount = 1 )
   Assert( Code\Expressions( 0 )\Operator = #LiteralExpression )
-  ;;;;TODO: check type
+  Assert( Code\Expressions( 0 )\Context = #ValueContext )
+  Assert( Code\Expressions( 0 )\Type = #IntegerLiteralType )
   Assert( Code\Expressions( 0 )\FirstOperandI = 1234 )
 EndProcedureUnit
 
@@ -1682,6 +1694,7 @@ ProcedureUnit CanParseNameExpression()
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\Identifiers( 0 ) = "test" )
   Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\Context = #ValueContext )
   ;;;;TODO: check type
   Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
 EndProcedureUnit
@@ -1694,6 +1707,7 @@ ProcedureUnit CanParseParenthesizedExpression()
   Assert( Code\IdentifierCount = 1 )
   Assert( Code\Identifiers( 0 ) = "a" )
   Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\Context = #ValueContext )
   Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
   Assert( Code\Expressions( 0 )\NextExpression = -1 )
 EndProcedureUnit
@@ -1850,6 +1864,7 @@ ProcedureUnit CanParseDerivedTypeDefinition()
   Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
   Assert( Code\Definitions( 0 )\Type = 0 )
   Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\Context = #TypeContext )
   Assert( Code\Expressions( 0 )\FirstOperandI = 1 )
 EndProcedureUnit
 
@@ -1919,6 +1934,7 @@ ProcedureUnit CanParseMethodDefinitionWithValueParameters()
   Assert( Code\Parameters( 1 )\Type = 0 )
   Assert( Code\Expressions( 0 )\Operator = #NameExpression )
   Assert( Code\Expressions( 0 )\FirstOperandI = 3 )
+  Assert( Code\Expressions( 0 )\Context = #TypeContext )
 EndProcedureUnit
 
 ProcedureUnit CanParseTypeDefinitionWithAnnotation()
@@ -1960,7 +1976,7 @@ ProcedureUnit CanParseSimpleProgram()
 EndProcedureUnit
 
 ;==============================================================================
-; Code generation.
+; Code generation and semantic analysis.
 ;;;;TODO: put this stuff on a thread
 
 Structure Asset
@@ -1968,6 +1984,8 @@ EndStructure
 
 Structure Field
   Name.s
+  Offset.i
+  Type.i
 EndStructure
 
 ; Type codes are type indices offset by the number of built-in types.
@@ -1980,17 +1998,23 @@ EndEnumeration
 
 EnumerationBinary TypeFlags
   #TypeIsArray
+  #TypeIsTuple
 EndEnumeration
 
-; No inheritance/derivation.
+; No inheritance/derivation at runtime.
+; Each type is basically two structs:
+;   (1) An instance struct (with sizeof() >= 0)
+;   (2) One static struct (with sizeof() >= 0)
 Structure Type
   Name.s
   SizeInBytes.i
   Flags.i
+  FirstField.i
+  FieldCount.i
 EndStructure
 
 Enumeration InstructionCode
-  #CallInsn ; Call function.
+  #CallInsn = 1 ; Call function.
   #ICallInsn ; Call intrinsic.
   #BranchInsn
   #JumpInsn
@@ -2000,6 +2024,11 @@ Enumeration InstructionCode
   #DivideInsn
   #LoadInsn
   #StoreInsn ; Void value instruction.
+EndEnumeration
+
+Enumeration Intrinsic
+  #IntrDebugLog = 1
+  #IntrDebugBreak
 EndEnumeration
 
 EnumerationBinary InstructionFlags
@@ -2014,6 +2043,8 @@ Structure Instruction
 EndStructure
 
 ; All functions are fully symmetric, i.e. 1 argument value, 1 result value.
+; Unlike methods, there's no overloading and no dispatching. Basically, a function is a "method group".
+; Any dispatching (where necessary) happens internally to a function.
 Structure Function
   Name.s
   ArgumentType.i
@@ -2024,7 +2055,7 @@ EndStructure
 
 Structure Object
   Type.i
-  ConstructorFunction.i
+  ConstructorFunction.i ;;??
 EndStructure
 
 Structure Program
@@ -2039,33 +2070,139 @@ Structure Program
   Array Assets.Asset( 0 )
   Array Functions.Function( 0 )
   Array Types.Type( 0 )
+  Array Fields.Field( 0 )
   Array Objects.Object( 0 )
   Array Instructions.Instruction( 0 )
 EndStructure
 
+; This is the compiled program.
 ; For now, we only support a single program in source.
 Global Program.Program
-
-Structure GenType
-  FieldCount.i
-  FirstField.i
-EndStructure
 
 ; These are de-duplicated. One instance of the same field is applied to every
 ; single type it applies to.
 Structure GenField
-  NextField.i
+  Name.s
+  Offset.i
+  Type.i
+  StructureUnion
+    DefaultValueI.i
+    DefaultValueF.d
+    DefaultValueS.i
+    DefaultValueO.i
+  EndStructureUnion
+EndStructure
+
+Enumeration GenTypeKind
+  #NamedType = 1
+  #DerivedType
+  #UnionType
+  #IntersectionType
+  #InstancedType
+  #TupleType
+  #DependentType
+EndEnumeration
+
+; Every type used in the program gets its own type instance.
+Structure GenType
+  Id.i ; Unique consecutive identifier.
+  TypeKind.i
+  DefinitionIndex.i ; If coming from definition (named types). Also gives the name.
+  FieldCount.i
+  Array Fields.GenField( 0 )
+  ; If it's a type combinator, this is the IDs of the type being combined.
+  ; For instanced types, the first is the generic type being instanced and the second is the tuple type applied to it.
+  LeftOperandTypeId.i
+  RightOperandTypeId.i
+  ; IDs of types that are combined with this one.
+  ; First 0 entry in array is end. If all entries taken, no 0 entry.
+  ; Unions and intersections are formed from type with *lower* ID (the operator is transitive).
+  Array Unions.i( 0 )
+  Array Intersections.i( 0 )
+  Array Tuples.i( 0 )
+  Array Instances.i( 0 )
+EndStructure
+
+EnumerationBinary GenMethodFlags
+  #IsReadMethod
+  #IsWriteMethod
+  #IsDefaultMethod
+  #IsIntrinsic
+EndEnumeration
+
+; A method implements a function for one specific argument type.
+; There can be only one method non-before/after/around method for any given argument type.
+; During code generation, the code for each method is inlined into the function it belongs to.
+Structure GenMethod
+  DefinitionIndex.i
+  MethodFlags.i
+  ArgumentType.i
 EndStructure
 
 Structure GenFunction
+  Name.s
+  MethodCount.i
+  Array Methods.GenMethod( 0 )
 EndStructure
 
 Structure GenObject
+  Name.s
 EndStructure
 
-;;;;TODO: would be more efficient to fold this into the parsing pass
-Procedure Collect( Map Types.GenType(), Map Fields.GenField(), Map Functions.GenFunction(), Map Objects.GenObject() )
+Structure GenTypeTable
+  TypeCount.i
+  ObjectTypeId.i
+  IntegerTypeId.i
+  FloatTypeId.i
+  ImmutableStringTypeId.i
+  *SubtypeMatrix ; 2-dimensional typecount*typecount bitfield matrix with subtype flags (1=is subtype, 0=is not subtype).
+  Array Types.GenType( 0 )
+  Map NamedTypes.i()
+EndStructure
+
+Structure GenFunctionTable
+  Map Functions.GenFunction()
+EndStructure
+
+Structure GenProgram
+  Name.s
+  Company.s
+  Product.s
+  TypeTable.GenTypeTable
+  FunctionTable.GenFunctionTable
+EndStructure
+
+; This is the intermediate representation of the program.
+; For semantic analysis.
+Global.GenProgram GenProgram
+
+Macro SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
+  Define.i FirstTypeId#Index = FirstTypeId - 1
+  Define.i SecondTypeId#Index = SecondTypeId - 1
+  Define.i SubtypeMatrixIndex = FirstTypeId#Index * GenProgram\TypeTable\TypeCount + SecondTypeId#Index
+  Define.i SubtypeMatrixOffset = SubtypeMatrixIndex / 8
+  Define.i SubtypeMatrixMask = 1 << ( SubtypeMatrixIndex % 8 )
+  Define *SubtypeMatrixPtr = GenProgram\TypeTable\SubtypeMatrix + SubtypeMatrixOffset
+EndMacro
+
+Procedure.b FirstIsSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
   
+  SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
+  ProcedureReturn Bool( ( PeekB( *SubtypeMatrixPtr ) & SubtypeMatrixMask ) <> 0 )
+  
+EndProcedure
+
+Procedure.b SetFirstIsSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
+  
+  SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
+  PokeB( *SubtypeMatrixPtr, PeekB( *SubtypeMatrixPtr ) | SubtypeMatrixMask )
+  
+EndProcedure
+
+;;;;TODO: would be more efficient to fold this into the parsing pass
+Procedure GenCollect()
+  
+  ; Collect definitions.
   Define.i DefinitionIndex
   For DefinitionIndex = 0 To Code\DefinitionCount - 1
     
@@ -2078,29 +2215,58 @@ Procedure Collect( Map Types.GenType(), Map Fields.GenField(), Map Functions.Gen
         
       Case #TypeDefinition
         
-        If FindMapElement( Types(), Name ) <> #Null
+        If FindMapElement( GenProgram\TypeTable\NamedTypes(), Name )
           ;;;;TODO: add diagnostic
           Debug "Type already defined!"
           Continue
         EndIf
         
-        Define *GenType.GenType = AddMapElement( Types(), Name )
+        Define.i TypeIndex = GenProgram\TypeTable\TypeCount
+        If ArraySize( GenProgram\TypeTable\Types() ) = TypeIndex
+          ReDim GenProgram\TypeTable\Types( TypeIndex + 512 )
+        EndIf
+        Define.i TypeId = TypeIndex + 1
+        AddMapElement( GenProgram\TypeTable\NamedTypes(), Name )
+        GenProgram\TypeTable\NamedTypes() = TypeId
+        GenProgram\TypeTable\TypeCount + 1
+        
+        Define *GenType.GenType = @GenProgram\TypeTable\Types( TypeIndex )
+        *GenType\DefinitionIndex = DefinitionIndex
+        *GenType\TypeKind = #NamedType
+        *GenType\Id = TypeId
+        
+        ;;;;REVIEW: should this be an annotation rather than just hardcoded names?
+        Select Name
+            
+          Case "object"
+            GenProgram\TypeTable\ObjectTypeId = TypeId
+            
+          Case "integer"
+            GenProgram\TypeTable\IntegerTypeId = TypeId
+            
+          Case "float"
+            GenProgram\TypeTable\FloatTypeId = TypeId
+            
+          Case "immutable_string"
+            GenProgram\TypeTable\ImmutableStringTypeId = TypeId
+            
+        EndSelect
         
       Case #ProgramDefinition
         
         ;;;;TODO: for now, ensure there is only one of these
         
-        Program\Name = Code\Identifiers( *Definition\Name )
+        GenProgram\Name = Code\Identifiers( *Definition\Name )
         
         Define.i AnnotationIndex = *Definition\FirstAnnotation
         While AnnotationIndex <> -1
           Define.Annotation *Annotation = @Code\Annotations( AnnotationIndex )
           Select *Annotation\AnnotationKind
             Case #ProductAnnotation
-              Program\Product = *Annotation\AnnotationText
+              GenProgram\Product = *Annotation\AnnotationText
               
             Case #CompanyAnnotation
-              Program\Company = *Annotation\AnnotationText
+              GenProgram\Company = *Annotation\AnnotationText
           EndSelect
           AnnotationIndex = *Annotation\NextAnnotation
         Wend
@@ -2109,24 +2275,70 @@ Procedure Collect( Map Types.GenType(), Map Fields.GenField(), Map Functions.Gen
     
   Next
   
+  ; Collect type expressions.
+  ; Type expressions cannot be forward-referenced meaning that by the time we
+  ; look at one entry in the expression list, the subexpressions it references must
+  ; have already been resolved.
+  Define ExpressionIndex.i
+  For ExpressionIndex = 0 To Code\ExpressionCount - 1
+    
+    Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
+    If *Expression\Context <> #TypeContext
+      Continue
+    EndIf
+    
+    Select *Expression\Operator
+        
+      Case #NameExpression
+        Define.s Name = Code\Identifiers( *Expression\FirstOperandI )
+        If Not FindMapElement( GenProgram\TypeTable\NamedTypes(), Name )
+          ;;;;TODO: Diagnostic
+          Debug "Cannot find type " + Name
+          Continue
+        EndIf
+        *Expression\Type = GenProgram\TypeTable\NamedTypes()
+        
+    EndSelect
+    
+  Next
+  
 EndProcedure
 
-Procedure GenTypes( Map Types.GenType(), Map Fields.GenField() )
+Procedure GenTypes()
   
-  ;;;;TODO: typecheck....
+  Define.i TypeCount = GenProgram\TypeTable\TypeCount
+  ReDim Program\Types( TypeCount )
+  Program\TypeCount = TypeCount
   
-  ForEach Types()
+  ; Allocate subtype matrix.
+  GenProgram\TypeTable\SubtypeMatrix = AllocateMemory( ( TypeCount * TypeCount + 7 ) / 8 )
+  
+  Define.i ObjectTypeId = GenProgram\TypeTable\ObjectTypeId
+  Define.i TypeIndex
+  For TypeIndex = 0 To TypeCount - 1
     
-    Define.GenType *GenType = Types()
-    
-    If ArraySize( Program\Types() ) = Program\TypeCount
-      ReDim Program\Types( Program\TypeCount + 512 )
-    EndIf
-    Define.i TypeIndex = Program\TypeCount
+    Define.GenType *GenType = @GenProgram\TypeTable\Types( TypeIndex )
     Define.Type *Type = @Program\Types( TypeIndex )
-    Program\TypeCount + 1
     
-    *Type\Name = MapKey( Types() )
+    If *GenType\TypeKind = #NamedType
+      *Type\Name = Code\Identifiers( Code\Definitions( *GenType\DefinitionIndex )\Name )
+    EndIf
+    
+    ; Establish subtype relationships.
+    SetFirstIsSubtypeOfSecond( *GenType\Id, *GenType\Id ) ; Every type is a subtype of itself.
+    If *GenType\TypeKind = #NamedType
+      Define.Definition *Definition = @Code\Definitions( *GenType\DefinitionIndex )
+      Define.i TypeExpressionIndex = *Definition\Type
+      
+      Define.i IdOfTypeDerivedFrom = ObjectTypeId
+      If TypeExpressionIndex <> -1
+        IdOfTypeDerivedFrom = Code\Expressions( TypeExpressionIndex )\Type
+      EndIf
+          
+      If IdOfTypeDerivedFrom <> 0
+        SetFirstIsSubtypeOfSecond( *GenType\Id, IdOfTypeDerivedFrom )
+      EndIf
+    EndIf
     
   Next
   
@@ -2135,32 +2347,69 @@ EndProcedure
 Procedure GenFunctions()
 EndProcedure
 
+Procedure GenFields()
+EndProcedure
+
 Procedure GenObjects()
 EndProcedure
 
 Procedure GenAssets()
 EndProcedure
 
+Procedure GenProgram()
+  Program\Name = GenProgram\Name
+  Program\Company = GenProgram\Company
+  Program\Product = GenProgram\Product
+EndProcedure
+
 ; Translate `Code` into `Program`.
-Procedure TranslateProgram()
+Procedure TranslateProgram( WithLibraries.b )
+  
+  If GenProgram\TypeTable\SubtypeMatrix <> #Null
+    FreeMemory( GenProgram\TypeTable\SubtypeMatrix )
+  EndIf
   
   ResetStructure( @Program, Program )
+  ResetStructure( @GenProgram, GenProgram )
   
   ;;;;FIXME: somehow the custom product and company strings we relate aren't coming through in the player builds...
   Program\Product = "DefaultProduct"
   Program\Company = "DefaultCompany"
   
-  NewMap Types.GenType()
-  NewMap Fields.GenField()
-  NewMap Functions.GenFunction()
-  NewMap Objects.GenObject()
+  GenProgram\TypeTable\ObjectTypeId = -1
+  GenProgram\TypeTable\IntegerTypeId = -1
+  GenProgram\TypeTable\FloatTypeId = -1
+  GenProgram\TypeTable\ImmutableStringTypeId = -1
   
-  Collect( Types(), Fields(), Functions(), Objects() )
+  GenCollect()
   
-  GenTypes( Types(), Fields() )
+  If WithLibraries
+    If GenProgram\TypeTable\ObjectTypeId = -1
+      Debug "Object type missing"
+      ProcedureReturn
+    EndIf
+    If GenProgram\TypeTable\IntegerTypeId = -1
+      Debug "Integer type missing"
+      ProcedureReturn
+    EndIf
+    If GenProgram\TypeTable\FloatTypeId = -1
+      Debug "Float type missing"
+      ProcedureReturn
+    EndIf
+    If GenProgram\TypeTable\ImmutableStringTypeId= -1
+      Debug "ImmutableString type missing"
+      ProcedureReturn
+    EndIf
+  EndIf
+  
+  GenTypes()
   GenFunctions()
   GenObjects()
   GenAssets()
+  GenProgram()
+  
+  Debug "GenFunctions: " + Str( MapSize( GenProgram\FunctionTable\Functions() ) ) + ", GenTypes: " +
+        Str( GenProgram\TypeTable\TypeCount )
   
 EndProcedure
 
@@ -2223,8 +2472,6 @@ Global.Code LibraryCode
 
 Procedure LoadLibraries()
   
-  ResetCode()
-  
   If Not LibrariesLoaded
     
     Define.i Directory = ExamineDirectory( #PB_Any, LibrariesPath , "*" + #SOURCE_FILE_EXTENSION )
@@ -2272,17 +2519,19 @@ EndProcedure
 
 Declare RefreshDocs()
 
-Procedure UpdateProgram()
+Procedure UpdateProgram( WithLibraries.b = #True )
     
   ResetCode()
-  LoadLibraries()
+  If WithLibraries
+    LoadLibraries()
+  EndIf
   ParseText()
   
   If Code\ErrorCount > 0
     ProcedureReturn
   EndIf
   
-  TranslateProgram()
+  TranslateProgram( WithLibraries )
   SendProjectSettings()
   
   If Code\ErrorCount > 0
@@ -2296,13 +2545,24 @@ EndProcedure
 
 ProcedureUnit CanCompileSimpleProgram()
   Define.s Text = ~"type FirstType;\n" +
-                  ~"type SecondType;\n"
+                  ~"type SecondType : FirstType;\n"
   *Text = UTF8( Text )
   TextLength = Len( Text )
-  UpdateProgram()
+  UpdateProgram( #False )
   Assert( Program\TypeCount = 2 )
   Assert( Program\Types( 0 )\Name = "first_type" )
   Assert( Program\Types( 1 )\Name = "second_type" )
+  Assert( GenProgram\TypeTable\TypeCount = 2 )
+  Assert( ArraySize( GenProgram\TypeTable\Types() ) >= 2 )
+  Assert( ArraySize( Program\Types() ) = 2 )
+  Assert( MapSize( GenProgram\TypeTable\NamedTypes() ) = 2 )
+  Assert( GenProgram\TypeTable\NamedTypes( "first_type" ) = 1 )
+  Assert( GenProgram\TypeTable\NamedTypes( "second_type" ) = 2 )
+  Assert( FirstIsSubtypeOfSecond( 1, 2 ) = #False )
+  Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )
+  Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )
+  Assert( FirstIsSubtypeOfSecond( 1, 1 ) = #True )
+  Assert( FirstIsSubtypeOfSecond( 2, 2 ) = #True )
   FreeMemory( *Text )
 EndProcedureUnit
 
@@ -2312,6 +2572,7 @@ EndProcedureUnit
 ;;;;TODO: put this on a separate thread
 ;;;;TODO: support docs for language elements (just have manual tab with handwritten content?)
 ;;;;TODO: add tab for assets
+;;;;TODO: generate from GenProgram instead of Code
 
 Global.b TemplatesLoaded = #False
 Global.s TOCTemplate
@@ -2373,7 +2634,7 @@ EndProcedure
 
 Procedure CollectCategories( Map TypeCategories.Category(), Map MethodCategories.Category() )
   
-  ;;;;TODO: fold this into the parsing pass
+  ;;;;TODO: fold this into the parsing or gen pass
   
   If Code\DefinitionCount = 0
     ProcedureReturn
@@ -2383,6 +2644,8 @@ Procedure CollectCategories( Map TypeCategories.Category(), Map MethodCategories
   For DefinitionIndex = 0 To Code\DefinitionCount - 1
     
     Define *Definition.Definition = @Code\Definitions( DefinitionIndex )
+    
+    ;;;;TODO: take inheritance into account
     
     Define.b IsCategorized = #False
     Define.i AnnotationIndex = *Definition\FirstAnnotation
@@ -2480,6 +2743,18 @@ EndProcedure
 
 Procedure GenerateDocsForDefinition( DefinitionKind.i, Name.s, *Builder.StringBuilder )
   
+  ;;;;TODO: parse x: markup
+  
+  ; Add title.
+  AppendString( *Builder, "<h2>" )
+  AppendString( *Builder, DefinitionKindToString( DefinitionKind ) )
+  AppendString( *Builder, ": <i>" )
+  AppendString( *Builder, Name )
+  AppendString( *Builder, "</i></h2>" )
+  
+  ;;;;TODO: for types, add supertype information (with link); or better yet; type hierarchy
+  ;;;;TODO: for functions, print prototypes (with links)
+  
   Define.i DefinitionIndex
   For DefinitionIndex = 0 To Code\DefinitionCount - 1
     
@@ -2493,6 +2768,7 @@ Procedure GenerateDocsForDefinition( DefinitionKind.i, Name.s, *Builder.StringBu
       Continue
     EndIf
     
+    ; Add content from doc annotations.
     Define.i AnnotationIndex = *Definition\FirstAnnotation
     While AnnotationIndex <> -1
       
@@ -2531,7 +2807,7 @@ Procedure.s GenerateDocsAt( Path.s )
   Define.StringBuilder Builder
   
   AppendString( @Builder, TOC )
-  AppendString( @Builder, ~"<td style=\"width: 80%;\"><div class=\"main\">" )
+  AppendString( @Builder, ~"<td style=\"width: 80%; vertical-align: top;\"><div class=\"main\">" )
   
   Select ArraySize( Parts() )
       
@@ -2735,6 +3011,8 @@ EndIf
 ;[X] Add DOTS to Unity project
 ;[X] Can add comments
 ;[X] Methods can have value parameters
+;[X] Can generate subtype matrix
+;[ ] Can generate and populate functions with methods
 ;[ ] Can invoke methods
 ;[ ] Can have conditional branches
 ;[ ] Can have loops
@@ -2756,6 +3034,7 @@ EndIf
 
 ; ...
 
+;[ ] Split up source code for IDE into modules
 ;[ ] Dark theme for text editor
 ;[ ] Diagnostics are shown as annotations on code
 ;[X] Can generate docs from code
@@ -2774,6 +3053,7 @@ EndIf
 ; Optimizations
 ; - Make a pass over the structs and make them more compact (indices can be 32bit, for example)
 ; - Instead of just plain arrays, have chunked/segmented arrays where the whole array does not need to be re-allocated and segments can be allocated in pages
+; - Instead of having `NextXXX` fields, switch to an approach where lists are added in bulk and the owner instead has `FirstXXX` and `XXXCount` fields
 
 ; What I want
 ; - All tests are being run continuously on all connected players (smart execution to narrow down run sets)
@@ -2792,7 +3072,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 2760
-; FirstLine = 2727
-; Folding = -------------
+; CursorPosition = 2378
+; FirstLine = 2365
+; Folding = --------------
 ; EnableXP
