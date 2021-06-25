@@ -2,17 +2,19 @@
 |CATEGORY StdLib
 ABSTRACT TYPE Object;
 
-    ABSTRACT TYPE Literal : Object;
+    ABSTRACT TYPE Number;
 
-        ABSTRACT TYPE Number : Literal;
+        IMMUTABLE TYPE Integer : Number;
+        IMMUTABLE TYPE Float : Number;
 
-            IMMUTABLE TYPE Integer : Number;
-            IMMUTABLE TYPE Float : Number;
+    ABSTRACT TYPE String;
 
-        ABSTRACT TYPE String : Literal;
+        MUTABLE TYPE MutableString : String;
+        IMMUTABLE TYPE ImmutableString : String;
 
-            MUTABLE TYPE MutableString : String;
-            IMMUTABLE TYPE ImmutableString : String;
+    ////REVIEW: include Boolean?
+    |DESCRIPTION A value that has a literal representation, i.e. a value that can be straightforwardly represented as a trivial piece of text.
+    ABSTRACT TYPE Literal = Integer | Float | String;
 
     |DESCRIPTION The universal value for 'true'.
     IMMUTABLE OBJECT True;
@@ -22,6 +24,13 @@ ABSTRACT TYPE Object;
 
     |DESCRIPTION A truth value.
     TYPE Boolean = True | False;
+
+    |DESCRIPTION Object that is used to denote the absence of a meaningful value.
+    |DETAILS This is the default result type for methods (think 'void' in C languages).
+    OBJECT Nothing;
+
+    ////TODO
+    //TYPE Optional< T > = T | Nothing;
 
     |CATEGORY Assets
     ABSTRACT TYPE Asset : Object;
