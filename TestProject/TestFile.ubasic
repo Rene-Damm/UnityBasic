@@ -3,6 +3,7 @@
 |PRODUCT MyProduct
 |COMPANY MyCompany
 |PRAGMA NamingConvention( pascal )
+|PRAGMA Indentation( 4, Spaces )
 PROGRAM FirstProgram;
 
 |CATEGORY MyShit

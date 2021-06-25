@@ -130,6 +130,11 @@ GOSCI_AddKeywords( Scintilla, "|DESCRIPTION |DETAILS |COMPANY |PRODUCT |CATEGORY
 
 GOSCI_SetLexerOption( Scintilla, #GOSCI_LEXEROPTION_SEPARATORSYMBOLS, @"=+-*/%()[],.;" )
 
+Global.i TabWidth = 4
+Global.b UseSoftTabs = #True
+
+GOSCI_SetTabs( Scintilla, TabWidth, UseSoftTabs )
+
 SetActiveGadget( Scintilla )
 
 ;==============================================================================
@@ -2665,6 +2670,26 @@ Procedure GenCollect()
                       DefaultNamingConvention = #JavaCase
                   EndSelect
                   
+                Case "indentation"
+                  
+                  Dim Arguments.s( 0 )
+                  SplitString( Arguments(), Argument, "," )
+                  If ArraySize( Arguments() ) >= 1
+                    TabWidth = Val( Trim( Arguments( 0 ) ) )
+                  EndIf
+                  If ArraySize( Arguments() ) >= 2
+                    Select LCase( Trim( Arguments( 1 ) ) )
+                      Case "spaces"
+                        UseSoftTabs = #True
+                      Case "tabs"
+                        UseSoftTabs = #False
+                      Default
+                        Debug "Unknown indentation setting: " + Arguments( 1 )
+                    EndSelect
+                  EndIf
+                  
+                  GOSCI_SetTabs( Scintilla, TabWidth, UseSoftTabs )
+                  
               EndSelect
               
           EndSelect
@@ -3461,7 +3486,7 @@ EndIf
 ;[X] Add DOTS to Unity project
 ;[X] Can add comments
 ;[X] Methods can have value parameters
-;[ ] Can generate subtype matrix
+;[X] Can generate subtype matrix
 ;[ ] Can generate and populate functions with methods
 ;[ ] Can invoke methods
 ;[ ] Can have conditional branches
@@ -3477,7 +3502,7 @@ EndIf
 
 ; ....
 
-;[ ] Can have type aliases
+;[X] Can have type aliases
 ;[ ] Can have method aliases
 ;[ ] Can write parameterized types
 ;[ ] Can instantiate parameterized types
@@ -3525,8 +3550,8 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 2646
-; FirstLine = 2619
+; CursorPosition = 2686
+; FirstLine = 2655
 ; Folding = --------------
-; Markers = 2633
+; Markers = 2638
 ; EnableXP
