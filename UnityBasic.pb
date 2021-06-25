@@ -1141,6 +1141,7 @@ Procedure.i ParseAnnotation( *Parser.Parser )
   Define.s Text
   If *Parser\Position > *StartPos
     Text = PeekS( *StartPos, *Parser\Position - *StartPos, #PB_UTF8 | #PB_ByteLength )
+    Text = Trim( Text )
   EndIf
   
   Define.i AnnotationIndex = Code\AnnotationCount
@@ -2190,7 +2191,7 @@ EndEnumeration
 ; Every type used in the program gets its own type instance.
 Structure GenType
   Id.i ; Unique consecutive identifier.
-  TypeKind.i
+  TypeKind.b
   DefinitionIndex.i ; If coming from definition (named types). Also gives the name.
   FieldCount.i
   Array Fields.GenField( 0 )
@@ -2239,7 +2240,7 @@ Structure GenTypeTable
   IntegerTypeId.i
   FloatTypeId.i
   ImmutableStringTypeId.i
-  *SubtypeMatrix ; 2-dimensional typecount*typecount bitfield matrix with subtype flags (1=is subtype, 0=is not subtype).
+  *SubtypeMatrix ; 2-dimensional typecount*typecount 2-bitfield matrix with subtype flags (0=not initialized, 1=is not subtype, 2=is subtype).
   Array Types.GenType( 0 )
   Map NamedTypes.i() ; Maps a name to a type ID. These are the "primitive" types all other types are built from. Also contains aliases.
   Map AliasToTypeExpression.i() ; Maps a name to an expression index.
@@ -2265,23 +2266,100 @@ Macro GenTypePtr( TypeId )
   @GenProgram\TypeTable\Types( TypeId - 1 )
 EndMacro
 
+#SUBTYPE_NOT_INITIALIZED = 0
+#SUBTYPE_FALSE = 1
+#SUBTYPE_TRUE = 2
+
 Macro SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
   Define.i FirstTypeId#Index = FirstTypeId - 1
   Define.i SecondTypeId#Index = SecondTypeId - 1
   Define.i SubtypeMatrixIndex = FirstTypeId#Index * GenProgram\TypeTable\TypeCount + SecondTypeId#Index
-  Define.i SubtypeMatrixOffset = SubtypeMatrixIndex / 8
-  Define.i SubtypeMatrixMask = 1 << ( SubtypeMatrixIndex % 8 )
-  Define *SubtypeMatrixPtr = GenProgram\TypeTable\SubtypeMatrix + SubtypeMatrixOffset
+  ; Two bits per entry.
+  Define.i SubtypeMatrixByteOffset = SubtypeMatrixIndex / 4
+  Define.i SubtypeMatrixBitOffset = ( SubtypeMatrixIndex % 4 ) * 2
+  Define.i SubtypeMatrixMask = 3 << SubtypeMatrixBitOffset
+  Define *SubtypeMatrixPtr = GenProgram\TypeTable\SubtypeMatrix + SubtypeMatrixByteOffset
+  CompilerIf #PB_Compiler_Debugger
+    If SubtypeMatrixIndex < 0
+      DebuggerError( "Negative subtype matrix index!" )
+    EndIf
+    If SubtypeMatrixByteOffset >= MemorySize( GenProgram\TypeTable\SubtypeMatrix )
+      DebuggerError( "Subtype byte offset out of range!" )
+    EndIf
+  CompilerEndIf
 EndMacro
 
+Declare.b ComputeIsFirstSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
+
 Procedure.b FirstIsSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
+  
+  CompilerIf #PB_Compiler_Debugger
+    If FirstTypeId <= 0
+      DebuggerError( "First type ID is invalid!" )
+    EndIf
+    If SecondTypeId <= 0
+      DebuggerError( "Second type ID is invalid!" )
+    EndIf
+  CompilerEndIf
+  
   SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
-  ProcedureReturn Bool( ( PeekB( *SubtypeMatrixPtr ) & SubtypeMatrixMask ) <> 0 )
+  
+  ; In order to avoid having to compute all NxN relationships up front, we make the process
+  ; lazy and only compute that part of the matrix that we actually need to understand the program.
+  
+  Define.b Value = ( PeekB( *SubtypeMatrixPtr ) & SubtypeMatrixMask ) >> SubtypeMatrixBitOffset
+  Select Value
+      
+    Case #SUBTYPE_NOT_INITIALIZED
+      If ComputeIsFirstSubtypeOfSecond( FirstTypeId, SecondTypeId )
+        PokeB( *SubtypeMatrixPtr, PeekB( *SubtypeMatrixPtr ) | ( #SUBTYPE_TRUE << SubtypeMatrixBitOffset ) )
+        ProcedureReturn #True
+      Else
+        PokeB( *SubtypeMatrixPtr, PeekB( *SubtypeMatrixPtr ) | ( #SUBTYPE_FALSE << SubtypeMatrixBitOffset ) )
+        ProcedureReturn #False
+      EndIf
+      
+    Case #SUBTYPE_TRUE
+      ProcedureReturn #True
+      
+    Case #SUBTYPE_FALSE
+      ProcedureReturn #False
+      
+  EndSelect
+  
 EndProcedure
 
 Procedure.b SetFirstIsSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
   SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
-  PokeB( *SubtypeMatrixPtr, PeekB( *SubtypeMatrixPtr ) | SubtypeMatrixMask )
+  PokeB( *SubtypeMatrixPtr, PeekB( *SubtypeMatrixPtr ) | ( #SUBTYPE_TRUE << SubtypeMatrixBitOffset ) )
+EndProcedure
+
+; Determine if 'FirstTypeId <: SecondTypeId' for any type relationship other than identity (FirstTypeId = SecondTypeId)
+; and direct derivation (FirstTypeId : SecondTypeId).
+Procedure.b ComputeIsFirstSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
+  
+  Define.GenType *SecondGenType = GenTypePtr( SecondTypeId )
+  Select *SecondGenType\TypeKind
+      
+    Case #IntersectionType
+      ProcedureReturn Bool( FirstIsSubtypeOfSecond( FirstTypeId, *SecondGenType\LeftOperandTypeId ) Or FirstIsSubtypeOfSecond( FirstTypeId, *SecondGenType\RightOperandTypeId ) )
+      
+    Case #UnionType
+      ProcedureReturn Bool( FirstIsSubtypeOfSecond( FirstTypeId, *SecondGenType\LeftOperandTypeId ) And FirstIsSubtypeOfSecond( FirstTypeId, *SecondGenType\RightOperandTypeId ) )
+      
+      
+  EndSelect
+  
+  Define.GenType *FirstGenType = GenTypePtr( FirstTypeId )
+  Select *FirstGenType\TypeKind
+      
+    Case #NamedType
+      ProcedureReturn FirstIsSubtypeOfSecond( *FirstGenType\LeftOperandTypeId, SecondTypeId )
+      
+  EndSelect
+
+  ProcedureReturn #False
+  
 EndProcedure
 
 ; Adds a new GenType to GenProgram\TypeTable\Types() and returns a *pointer* to it.
@@ -2299,7 +2377,7 @@ Procedure.i NewGenType( TypeKind.i )
   *GenType\Id = TypeId   
   
   ProcedureReturn *GenType
-            
+
 EndProcedure
 
 ;;;;TODO: catch cycles!
@@ -2483,6 +2561,8 @@ Procedure GenCollect()
           AddMapElement( GenProgram\TypeTable\AliasToTypeExpression(), Name )
           GenProgram\TypeTable\AliasToTypeExpression() = *Definition\TypeExpression
           ; Put placeholder in table.
+          ; NOTE: type aliases that aren't actually used will remain unresolved in the
+          ;       name table.
           AddMapElement( GenProgram\TypeTable\NamedTypes(), Name )
           GenProgram\TypeTable\NamedTypes() = #INVALID_TYPE_ID
           Continue
@@ -2572,6 +2652,9 @@ Procedure.s GenTypeName( *GenType.GenType )
     Case #FunctionType
       ProcedureReturn "fun(" + GenTypeName( GenTypePtr( *GenType\LeftOperandTypeId ) ) + "," + GenTypeName( GenTypePtr( *GenType\RightOperandTypeId ) ) + ")"
       
+    Case #TupleType
+      ProcedureReturn "tpl(" + GenTypeName( GenTypePtr( *GenType\LeftOperandTypeId ) ) + "," + GenTypeName( GenTypePtr( *GenType\RightOperandTypeId ) ) + ")"
+      
     Default
       ProcedureReturn "<unknown>?!?!?!?"
       
@@ -2594,19 +2677,20 @@ Procedure GenTypes()
   Define.i TypeCount = GenProgram\TypeTable\TypeCount
   ReDim Program\Types( TypeCount )
   Program\TypeCount = TypeCount
-  GenProgram\TypeTable\SubtypeMatrix = AllocateMemory( ( TypeCount * TypeCount + 7 ) / 8 )
+  GenProgram\TypeTable\SubtypeMatrix = AllocateMemory( ( TypeCount * TypeCount + 3 ) / 4 )
   Define.i ObjectTypeId = GenProgram\TypeTable\ObjectTypeId
   Define.i TypeIndex
   For TypeIndex = 0 To TypeCount - 1
     
+    ;;;;REVIEW: only put certain types in the final program? (like e.g. ones that are actually instantiated)
     ; Add to program.
     Define.GenType *GenType = @GenProgram\TypeTable\Types( TypeIndex )
     Define.Type *Type = @Program\Types( TypeIndex )
     *Type\Name = GenTypeName( *GenType )
-    
-    ;;;;this needs to be iterative all the way to Object
-    
-    ; Establish subtype relationships.
+        
+    ; Establish trivial subtype relationships for named types.
+    ; These are the starting relationships based on which we later lazily compute
+    ; all other subtype relationships.
     SetFirstIsSubtypeOfSecond( *GenType\Id, *GenType\Id ) ; Every type is a subtype of itself.
     If *GenType\TypeKind = #NamedType
       Define.Definition *Definition = @Code\Definitions( *GenType\DefinitionIndex )
@@ -2617,9 +2701,13 @@ Procedure GenTypes()
         IdOfTypeDerivedFrom = Code\Expressions( TypeExpressionIndex )\Type
       EndIf
           
-      If IdOfTypeDerivedFrom <> 0
+      If IdOfTypeDerivedFrom <> #INVALID_TYPE_ID
         SetFirstIsSubtypeOfSecond( *GenType\Id, IdOfTypeDerivedFrom )
       EndIf
+      
+      ; Store ID of type derived from in #NamedType GenType.
+      *GenType\LeftOperandTypeId = IdOfTypeDerivedFrom
+      
     EndIf
     
   Next
@@ -2651,6 +2739,7 @@ Procedure TranslateProgram( WithLibraries.b )
   
   If GenProgram\TypeTable\SubtypeMatrix <> #Null
     FreeMemory( GenProgram\TypeTable\SubtypeMatrix )
+    GenProgram\TypeTable\SubtypeMatrix = #Null
   EndIf
   
   ResetStructure( @Program, Program )
@@ -2805,6 +2894,8 @@ EndProcedure
 Declare RefreshDocs()
 
 Procedure UpdateProgram( WithLibraries.b = #True )
+  
+  Debug "Compiling..."
     
   ResetCode()
   If WithLibraries
@@ -2835,37 +2926,44 @@ ProcedureUnit CanCompileSimpleProgram()
                   ~"type ThirdType;\n" +
                   ~"type FourthType = FirstType | ThirdType;\n" +
                   ~"type FifthType = ThirdType;\n" +
-                  ~"type SixthType = FourthType | SecondType;\n"
+                  ~"type SixthType = FourthType | SecondType;\n" +
+                  ~"type SeventhType : SecondType;\n"
   
   *Text = UTF8( Text )
   TextLength = Len( Text )
   
   UpdateProgram( #False )
   
-  Assert( Program\TypeCount = 5 )
-  Assert( ArraySize( Program\Types() ) = 5 )
+  Assert( Program\TypeCount = 6 )
+  Assert( ArraySize( Program\Types() ) = 6 )
   Assert( Program\Types( 0 )\Name = "first_type" )
   Assert( Program\Types( 1 )\Name = "second_type" )
   Assert( Program\Types( 2 )\Name = "third_type" )
-  Assert( Program\Types( 3 )\Name = "or(first_type,third_type)" )
-  Assert( Program\Types( 4 )\Name = "or(second_type,or(first_type,third_type))" )
+  Assert( Program\Types( 3 )\Name = "seventh_type" )
+  Assert( Program\Types( 4 )\Name = "or(first_type,third_type)" )
+  Assert( Program\Types( 5 )\Name = "or(second_type,or(first_type,third_type))" )
   
-  Assert( GenProgram\TypeTable\TypeCount = 5 )
-  Assert( ArraySize( GenProgram\TypeTable\Types() ) >= 5 )
+  Assert( GenProgram\TypeTable\TypeCount = 6 )
+  Assert( ArraySize( GenProgram\TypeTable\Types() ) >= 6 )
   
-  Assert( MapSize( GenProgram\TypeTable\NamedTypes() ) = 6 )
+  Assert( MapSize( GenProgram\TypeTable\NamedTypes() ) = 7 )
   Assert( GenProgram\TypeTable\NamedTypes( "first_type" ) = 1 )
   Assert( GenProgram\TypeTable\NamedTypes( "second_type" ) = 2 )
   Assert( GenProgram\TypeTable\NamedTypes( "third_type" ) = 3 )
-  Assert( GenProgram\TypeTable\NamedTypes( "fourth_type" ) = 4 )
+  Assert( GenProgram\TypeTable\NamedTypes( "fourth_type" ) = 5 )
   Assert( GenProgram\TypeTable\NamedTypes( "fifth_type" ) = #INVALID_TYPE_ID ) ; Unused alias.
   Assert( GenProgram\TypeTable\NamedTypes( "sixth_type" ) = #INVALID_TYPE_ID ) ; Unused alias.
+  Assert( GenProgram\TypeTable\NamedTypes( "seventh_type" ) = 4 ) ; Unused alias.
   
-  ;Assert( FirstIsSubtypeOfSecond( 1, 2 ) = #False )
-  ;Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )
-  ;Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )
-  ;Assert( FirstIsSubtypeOfSecond( 1, 1 ) = #True )
-  ;Assert( FirstIsSubtypeOfSecond( 2, 2 ) = #True )
+  Assert( FirstIsSubtypeOfSecond( 1, 2 ) = #False ) ; FirstType   !: SecondType
+  Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )  ; SecondType  <: FirstType
+  Assert( FirstIsSubtypeOfSecond( 1, 1 ) = #True )  ; FirstType   <: FirstType
+  Assert( FirstIsSubtypeOfSecond( 2, 2 ) = #True )  ; SecondType  <: SecondType
+  Assert( FirstIsSubtypeOfSecond( 1, 5 ) = #True )  ; FirstType   <: ( FirstType | ThirdType )
+  Assert( FirstIsSubtypeOfSecond( 5, 1 ) = #False ) ; ( FirstType | ThirdType ) !: FirstType
+  Assert( FirstIsSubtypeOfSecond( 1, 4 ) = #False ) ; FirstType   !: SeventhType
+  Assert( FirstIsSubtypeOfSecond( 4, 1 ) = #True )  ; SeventhType <: FirstType
+  Assert( FirstIsSubtypeOfSecond( 4, 2 ) = #True )  ; SeventhType <: SecondType
   
   FreeMemory( *Text )
   
@@ -3385,7 +3483,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 2872
-; FirstLine = 2835
+; CursorPosition = 2286
+; FirstLine = 2257
 ; Folding = --------------
 ; EnableXP
