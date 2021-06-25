@@ -4,6 +4,7 @@
 |COMPANY MyCompany
 |PRAGMA NamingConvention( pascal )
 |PRAGMA Indentation( 4, Spaces )
+|PRAGMA Debug( writecode )
 PROGRAM FirstProgram;
 
 |CATEGORY MyShit

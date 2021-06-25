@@ -2174,6 +2174,8 @@ EndStructure
 ; For now, we only support a single program in source.
 Global Program.Program
 
+Global.b WriteGeneratedProgramToDisk = #False
+
 ; These are de-duplicated. One instance of the same field is applied to every
 ; single type it applies to.
 Structure GenField
@@ -2720,6 +2722,20 @@ Procedure GenCollect()
                   
                   GOSCI_SetTabs( Scintilla, TabWidth, UseSoftTabs )
                   
+                Case "debug"
+                  
+                  Dim Arguments.s( 0 )
+                  SplitString( Arguments(), Argument, "," )
+                  If ArraySize( Arguments() )
+                    Define.i Index
+                    For Index = 0 To ArraySize( Arguments() ) -1
+                      Select LCase( Arguments( Index ) )
+                        Case "writecode"
+                          WriteGeneratedProgramToDisk = #True
+                      EndSelect
+                    Next
+                  EndIf
+                  
               EndSelect
               
           EndSelect
@@ -2960,31 +2976,55 @@ EndProcedure
 
 Procedure SendProgram()
   
-  If UnityPlayerClient = 0
+  If Not UnityPlayerClient And Not WriteGeneratedProgramToDisk
     ProcedureReturn
   EndIf
   
-  StartBatchSend( UnityPlayerClient )
-  ;;;;TODO: send program delta for incremental changes instead of resetting all the time
-  BatchSendString( "reset" )
+  Define.i File = 0
+  If WriteGeneratedProgramToDisk
+    File = OpenFile( #PB_Any, TextFilePath + ".gen", #PB_UTF8 )
+  EndIf
+  
+  If UnityPlayerClient
+    StartBatchSend( UnityPlayerClient )
+    ;;;;TODO: send program delta for incremental changes instead of resetting all the time
+    BatchSendString( "reset" )
+  EndIf
   
   Define.i Index
   
   ; Send types.
-  For Index = 0 To Program\TypeCount - 1
-    Define.Type *Type = @Program\Types( Index )
-    Define.s Message = ToTypeMessage( *Type )
-    BatchSendString( Message )
-  Next
+  If Program\TypeCount > 0
+    For Index = 0 To Program\TypeCount - 1
+      Define.Type *Type = @Program\Types( Index )
+      Define.s Message = ToTypeMessage( *Type )
+      If File
+        WriteStringN( File, Message, #PB_UTF8 )
+      EndIf
+      If UnityPlayerClient
+        BatchSendString( Message )
+      EndIf
+    Next
+  EndIf
   
   ; Send functions.
+  If Program\FunctionCount > 0
+    For Index = 0 To Program\FunctionCount - 1
+      Define.Function *Function = @Program\Functions( Index )
+    Next
+  EndIf
   
   ; Send objects.
   
   ; Send assets.
   
-  BatchSendString( "commit" )
-  FinishBatchSend()
+  If File
+    CloseFile( File )
+  EndIf
+  If UnityPlayerClient
+    BatchSendString( "commit" )
+    FinishBatchSend()
+  EndIf
     
 EndProcedure
 
@@ -3651,7 +3691,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 3589
-; FirstLine = 3564
+; CursorPosition = 2737
+; FirstLine = 2691
 ; Folding = ---------------
 ; EnableXP
