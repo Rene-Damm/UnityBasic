@@ -2,6 +2,7 @@
 
 |PRODUCT MyProduct
 |COMPANY MyCompany
+|PRAGMA NamingConvention( pascal )
 PROGRAM FirstProgram;
 
 |CATEGORY MyShit

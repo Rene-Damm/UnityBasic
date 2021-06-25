@@ -126,7 +126,7 @@ GOSCI_AddDelimiter( Scintilla, "/*", "*/", #GOSCI_DELIMITTOENDOFLINE, #StyleComm
 GOSCI_AddDelimiter( Scintilla, ~"\"", ~"\"", #GOSCI_DELIMITBETWEEN, #StyleString )
 
 GOSCI_AddKeywords( Scintilla, "TYPE METHOD FIELD OBJECT PROGRAM BEGIN END RETURN ABSTRACT IMMUTABLE MUTABLE IF LOOP", #StyleKeyword )
-GOSCI_AddKeywords( Scintilla, "|DESCRIPTION |DETAILS |COMPANY |PRODUCT |CATEGORY |ICALL", #StyleAnnotation )
+GOSCI_AddKeywords( Scintilla, "|DESCRIPTION |DETAILS |COMPANY |PRODUCT |CATEGORY |ICALL |PRAGMA", #StyleAnnotation )
 
 GOSCI_SetLexerOption( Scintilla, #GOSCI_LEXEROPTION_SEPARATORSYMBOLS, @"=+-*/%()[],.;" )
 
@@ -432,6 +432,7 @@ Enumeration AnnotationKind
   
   ; Misc annotations.
   #IcallAnnotation
+  #PragmaAnnotation
   
 EndEnumeration
 
@@ -1120,6 +1121,8 @@ Procedure.i ParseAnnotation( *Parser.Parser )
     AnnotationKind = #DetailsAnnotation
   ElseIf MatchToken( *Parser, "category", 8 )
     AnnotationKind = #CategoryAnnotation
+  ElseIf MatchToken( *Parser, "pragma", 6 )
+    AnnotationKind = #PragmaAnnotation
   ElseIf MatchToken( *Parser, "product", 7 )
     AnnotationKind = #ProductAnnotation
   ElseIf MatchToken( *Parser, "company", 7 )
@@ -2620,11 +2623,50 @@ Procedure GenCollect()
         While AnnotationIndex <> -1
           Define.Annotation *Annotation = @Code\Annotations( AnnotationIndex )
           Select *Annotation\AnnotationKind
+              
             Case #ProductAnnotation
               GenProgram\Product = *Annotation\AnnotationText
               
             Case #CompanyAnnotation
               GenProgram\Company = *Annotation\AnnotationText
+              
+            Case #PragmaAnnotation
+              
+              Define.s Pragma = ""
+              Define.s Argument = ""
+              
+              Define.i IndexOfOpenParen = FindString( *Annotation\AnnotationText, "(" )
+              If IndexOfOpenParen = 0
+                Pragma = *Annotation\AnnotationText
+              Else
+                Pragma = Left( *Annotation\AnnotationText, IndexOfOpenParen - 1 )
+                Define.i IndexOfCloseParen = FindString( *Annotation\AnnotationText, ")" )
+                If IndexOfCloseParen = 0
+                  Argument = Mid( *Annotation\AnnotationText, IndexOfOpenParen + 1 )
+                Else
+                  Argument = Mid( *Annotation\AnnotationText, IndexOfOpenParen + 1, IndexOfCloseParen - IndexOfOpenParen - 1 )
+                EndIf
+                
+                Pragma = Trim( Pragma )
+                Argument = Trim( Argument )
+              EndIf
+              
+              Select LCase( Pragma )
+                  
+                Case "namingconvention"
+                  Select LCase( Argument )
+                    Case "gnu"
+                      DefaultNamingConvention = #GnuCase
+                      
+                    Case "pascal"
+                      DefaultNamingConvention = #PascalCase
+                      
+                    Case "java"
+                      DefaultNamingConvention = #JavaCase
+                  EndSelect
+                  
+              EndSelect
+              
           EndSelect
           AnnotationIndex = *Annotation\NextAnnotation
         Wend
@@ -3483,7 +3525,8 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 2286
-; FirstLine = 2257
+; CursorPosition = 2646
+; FirstLine = 2619
 ; Folding = --------------
+; Markers = 2633
 ; EnableXP
