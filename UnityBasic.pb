@@ -457,13 +457,14 @@ Structure Clause
   NextClause.i
 EndStructure
 
-; -1 is invalid index. Further negative values are "built-in" types for literals, i.e. types for
-; which literal values exist. Note that Boolean isn't among them -- True and False are singletons.
+#INVALID_TYPE_ID = 0
+
+; During parsing, we assign negative type IDs as stand-ins for types of literals.
 ; During compilation, these are replaced with actual type IDs.
 Enumeration LiteralType
-  #IntegerLiteralType = -2
-  #FloatLiteralType = -3
-  #StringLiteralType = -4
+  #IntegerLiteralType = -1
+  #FloatLiteralType = -2
+  #StringLiteralType = -3
 EndEnumeration
 
 Enumeration Operator
@@ -476,6 +477,7 @@ Enumeration Operator
   #BitwiseOrExpression
   #ApplyExpression ; For types, this instantiates the given named type.
   #TupleExpression
+  #ArrowExpression ; A -> B (type context: function type, value context: anonymous function)
 EndEnumeration
 
 Enumeration ExpressionContext
@@ -1168,7 +1170,7 @@ Procedure.i ParseBasicExpression( *Parser.Parser )
   Define.i LeftPos = *Parser\Position - *Parser\StartPosition
   
   Define.i Operator = -1
-  Define.i Type = -1
+  Define.i Type = #INVALID_TYPE_ID
   Define.i FirstOperandI
   
   Define.c Char = PeekB( *Parser\Position )
@@ -1277,7 +1279,7 @@ Procedure.i ParseUnaryPostfixExpression( *Parser.Parser )
       
     Define.i SecondExpression = ParseBasicExpression( *Parser )
     If SecondExpression <> -1
-      MakeExpressionOp2I( ApplyExpr, #ApplyExpression, -1, FirstExpression, SecondExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
+      MakeExpressionOp2I( ApplyExpr, #ApplyExpression, #INVALID_TYPE_ID, FirstExpression, SecondExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
       ProcedureReturn ApplyExpr
     EndIf
     
@@ -1300,7 +1302,7 @@ Procedure.i ParseUnaryPrefixExpression( *Parser.Parser )
   Define.i Expression = ParseUnaryPostfixExpression( *Parser )
   
   If PrefixOperator <> -1
-    MakeExpressionOpI( UnaryExpression, PrefixOperator, -1, Expression, LeftPos )
+    MakeExpressionOpI( UnaryExpression, PrefixOperator, #INVALID_TYPE_ID, Expression, LeftPos )
     Expression = UnaryExpression
   EndIf
   
@@ -1352,7 +1354,7 @@ Procedure.i ParseBinaryExpression( *Parser.Parser )
     
     Define.i RightExpression = ParseExpression( *Parser )
     
-    MakeExpressionOp2I( BinaryExpression, Operator, -1, Expression, RightExpression, Code\Expressions( Expression )\Region\LeftPos )
+    MakeExpressionOp2I( BinaryExpression, Operator, #INVALID_TYPE_ID, Expression, RightExpression, Code\Expressions( Expression )\Region\LeftPos )
     Expression = BinaryExpression
     
   EndIf
@@ -2177,11 +2179,11 @@ EndStructure
 
 Enumeration GenTypeKind
   #NamedType = 1
-  #DerivedType
   #UnionType
   #IntersectionType
   #InstancedType
   #TupleType
+  #FunctionType
   #DependentType
 EndEnumeration
 
@@ -2198,11 +2200,8 @@ Structure GenType
   RightOperandTypeId.i
   ; IDs of types that are combined with this one.
   ; First 0 entry in array is end. If all entries taken, no 0 entry.
-  ; Unions and intersections are formed from type with *lower* ID (the operator is transitive).
-  Array Unions.i( 0 )
-  Array Intersections.i( 0 )
-  Array Tuples.i( 0 )
-  Array Instances.i( 0 )
+  ; All binary combinations are formed from type with *lower* ID (the operator is transitive).
+  Array Combinations.i( 0 )
 EndStructure
 
 EnumerationBinary GenMethodFlags
@@ -2242,7 +2241,8 @@ Structure GenTypeTable
   ImmutableStringTypeId.i
   *SubtypeMatrix ; 2-dimensional typecount*typecount bitfield matrix with subtype flags (1=is subtype, 0=is not subtype).
   Array Types.GenType( 0 )
-  Map NamedTypes.i()
+  Map NamedTypes.i() ; Maps a name to a type ID. These are the "primitive" types all other types are built from. Also contains aliases.
+  Map AliasToTypeExpression.i() ; Maps a name to an expression index.
 EndStructure
 
 Structure GenFunctionTable
@@ -2260,6 +2260,10 @@ EndStructure
 ; This is the intermediate representation of the program.
 ; For semantic analysis.
 Global.GenProgram GenProgram
+
+Macro GenTypePtr( TypeId )
+  @GenProgram\TypeTable\Types( TypeId - 1 )
+EndMacro
 
 Macro SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
   Define.i FirstTypeId#Index = FirstTypeId - 1
@@ -2280,10 +2284,182 @@ Procedure.b SetFirstIsSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
   PokeB( *SubtypeMatrixPtr, PeekB( *SubtypeMatrixPtr ) | SubtypeMatrixMask )
 EndProcedure
 
+; Adds a new GenType to GenProgram\TypeTable\Types() and returns a *pointer* to it.
+Procedure.i NewGenType( TypeKind.i )
+  
+  Define.i TypeIndex = GenProgram\TypeTable\TypeCount
+  If ArraySize( GenProgram\TypeTable\Types() ) = TypeIndex
+    ReDim GenProgram\TypeTable\Types( TypeIndex + 512 )
+  EndIf
+  GenProgram\TypeTable\TypeCount + 1
+  Define.i TypeId = TypeIndex + 1
+  
+  Define.GenType *GenType = @GenProgram\TypeTable\Types( TypeIndex )
+  *GenType\TypeKind = TypeKind
+  *GenType\Id = TypeId   
+  
+  ProcedureReturn *GenType
+            
+EndProcedure
+
+;;;;TODO: catch cycles!
+; Determine the type of the given expression.
+; Works for both value and type expressions.
+; May lead to other type expressions being assign types as a side effect.
+; Will generate new types as needed (for every new unique type combination found).
+; Returns the type ID assigned to the expression.
+Procedure.i AssignTypeId( ExpressionIndex.i )
+  
+  Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
+  
+  ; Early out if expression has already been assigned a type.
+  Define.i TypeId = *Expression\Type
+  If TypeId <> 0
+    
+    ; If it's a literal type, replace it with the type ID for the respective
+    ; named type that we found in the program.
+    If Type < 0
+      Select Type
+          
+        Case #IntegerLiteralType
+          TypeId = GenProgram\TypeTable\IntegerTypeId
+          
+        Case #FloatLiteralType
+          TypeId = GenProgram\TypeTable\FloatTypeId
+          
+        Case #StringLiteralType
+          TypeId = GenProgram\TypeTable\ImmutableStringTypeId
+          
+        Default
+          Debug "Unknown literal type!"
+          
+      EndSelect
+      
+      *Expression\Type = TypeId
+    EndIf
+    
+  Else
+  
+    If *Expression\Context = #ValueContext
+      
+      ; Assign type to value expression.
+      
+    Else
+      
+      ; Assign type to type expression.
+      
+      Select *Expression\Operator
+          
+        Case #NameExpression
+          
+          Define.s Name = Code\Identifiers( *Expression\FirstOperandI )
+          If Not FindMapElement( GenProgram\TypeTable\NamedTypes(), Name )
+            ;;;;TODO: Diagnostic
+            Debug "Cannot find type " + Name
+          Else
+            TypeId = GenProgram\TypeTable\NamedTypes()
+            If TypeId = #INVALID_TYPE_ID
+              
+              ; It's a type alias.
+              If Not FindMapElement( GenProgram\TypeTable\AliasToTypeExpression(), Name )
+                ; This should not happend.
+                Debug "Cannot find aliased type expression for " + NAme
+              Else
+                Define.i AliasedTypeExpression = GenProgram\TypeTable\AliasToTypeExpression()
+                TypeId = AssignTypeId( AliasedTypeExpression )
+                GenProgram\TypeTable\NamedTypes( Name ) = TypeId
+              EndIf
+              
+            EndIf
+          EndIf
+          
+        Case #AndExpression, #OrExpression, #ApplyExpression, #TupleExpression, #ArrowExpression
+          
+          Define.i CombinedTypeKind = -1
+          Select *Expression\Operator
+            Case #AndExpression
+              CombinedTypeKind = #UnionType
+            Case #OrExpression
+              CombinedTypeKind = #IntersectionType
+            Case #ApplyExpression
+              CombinedTypeKind = #InstancedType
+            Case #TupleExpression
+              CombinedTypeKind = #TupleType
+            Case #ArrowExpression
+              CombinedTypeKind = #FunctionType
+          EndSelect
+          
+          Define.i LeftTypeId = AssignTypeId( *Expression\FirstOperandI )
+          Define.i RightTypeId = AssignTypeId( *Expression\SecondOperandI )
+          
+          ; NOTE: We allow combining a type with itself.
+          
+          ; We always combine the type with the *higher* ID *into* the type with the *lower* one.
+          If LeftTypeId > RightTypeId
+            Swap LeftTypeId, RightTypeId
+          EndIf
+          
+          Define.i LeftTypeIndex = LeftTypeId - 1
+          Define.i RightTypeIndex = RightTypeId - 1
+          
+          ; NOTE: As soon as we add a type, this pointer must be considered invalid!
+          Define.GenType *LeftType = @GenProgram\TypeTable\Types( LeftTypeIndex )
+          
+          ; Search the list of existing combinations for this particular one.
+          TypeId = #INVALID_TYPE_ID
+          Define.i CombinationIndex
+          For CombinationIndex = 0 To ArraySize( *LeftType\Combinations() ) - 1
+            
+            Define.i CombinedTypeId = *LeftType\Combinations( CombinationIndex )
+            If CombinedTypeId = #INVALID_TYPE_ID
+              Break
+            EndIf
+            
+            Define.i CombinedTypeIndex = CombinedTypeId - 1
+            Define.GenType *CombinedType = @GenProgram\TypeTable\Types( CombinedTypeIndex )
+            If *CombinedType\TypeKind = CombinedTypeKind And *CombinedType\RightOperandTypeId = RightTypeId
+              ; Found it. This is the right combination type and the right operand.
+              TypeId = *CombinedType\Id
+              Break
+            EndIf
+            
+          Next
+          
+          ; If we didn't find an existing combination, add a new one.
+          If TypeId = #INVALID_TYPE_ID
+            
+            Define.GenType *GenType = NewGenType( CombinedTypeKind )
+            *GenType\LeftOperandTypeId = LeftTypeId
+            *GenType\RightOperandTypeId = RightTypeId
+            
+            ; If needed, make space in array.
+            If CombinationIndex = ArraySize( *LeftType\Combinations() )
+              ReDim *LeftType\Combinations( CombinationIndex + 8 )
+            EndIf
+            *LeftType\Combinations( CombinationIndex ) = *GenType\Id
+            
+          EndIf
+          
+      EndSelect
+    
+      
+    EndIf
+    
+    *Expression\Type = TypeId
+    
+  EndIf
+  
+  ProcedureReturn TypeId
+  
+EndProcedure
+
 ;;;;TODO: would be more efficient to fold this into the parsing pass
 Procedure GenCollect()
   
   ; Collect definitions.
+  ; As a side-effect, we assign a unique type ID to every named type definition that isn't an alias. This
+  ; is the first pass of type generation which essentially puts the starting set of "primitive" type IDs
+  ; in place. All other type IDs are combinations synthesized from this set of primitives.
   Define.i DefinitionIndex
   For DefinitionIndex = 0 To Code\DefinitionCount - 1
     
@@ -2302,34 +2478,36 @@ Procedure GenCollect()
           Continue
         EndIf
         
-        Define.i TypeIndex = GenProgram\TypeTable\TypeCount
-        If ArraySize( GenProgram\TypeTable\Types() ) = TypeIndex
-          ReDim GenProgram\TypeTable\Types( TypeIndex + 512 )
+        If *Definition\Flags & #IsAlias
+          ;;;;TODO: ensure that the alias doesn't attempt to add new modifiers (like 'abstract')
+          AddMapElement( GenProgram\TypeTable\AliasToTypeExpression(), Name )
+          GenProgram\TypeTable\AliasToTypeExpression() = *Definition\TypeExpression
+          ; Put placeholder in table.
+          AddMapElement( GenProgram\TypeTable\NamedTypes(), Name )
+          GenProgram\TypeTable\NamedTypes() = #INVALID_TYPE_ID
+          Continue
         EndIf
-        Define.i TypeId = TypeIndex + 1
-        AddMapElement( GenProgram\TypeTable\NamedTypes(), Name )
-        GenProgram\TypeTable\NamedTypes() = TypeId
-        GenProgram\TypeTable\TypeCount + 1
         
-        Define *GenType.GenType = @GenProgram\TypeTable\Types( TypeIndex )
+        Define.GenType *GenType = NewGenType( #NamedType )
         *GenType\DefinitionIndex = DefinitionIndex
-        *GenType\TypeKind = #NamedType
-        *GenType\Id = TypeId
+        
+        AddMapElement( GenProgram\TypeTable\NamedTypes(), Name )
+        GenProgram\TypeTable\NamedTypes() = *GenType\Id
         
         ;;;;REVIEW: should this be an annotation rather than just hardcoded names?
         Select Name
             
           Case "object"
-            GenProgram\TypeTable\ObjectTypeId = TypeId
+            GenProgram\TypeTable\ObjectTypeId = *GenType\Id
             
           Case "integer"
-            GenProgram\TypeTable\IntegerTypeId = TypeId
+            GenProgram\TypeTable\IntegerTypeId = *GenType\Id
             
           Case "float"
-            GenProgram\TypeTable\FloatTypeId = TypeId
+            GenProgram\TypeTable\FloatTypeId = *GenType\Id
             
           Case "immutable_string"
-            GenProgram\TypeTable\ImmutableStringTypeId = TypeId
+            GenProgram\TypeTable\ImmutableStringTypeId = *GenType\Id
             
         EndSelect
         
@@ -2375,54 +2553,58 @@ Procedure GenCollect()
     
   Next
   
-  ; Collect type expressions.
-  ; Type expressions cannot be forward-referenced meaning that by the time we
-  ; look at one entry in the expression list, the subexpressions it references must
-  ; have already been resolved.
-  Define ExpressionIndex.i
-  For ExpressionIndex = 0 To Code\ExpressionCount - 1
-    
-    Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
-    If *Expression\Context <> #TypeContext
-      Continue
-    EndIf
-    
-    Select *Expression\Operator
-        
-      Case #NameExpression
-        Define.s Name = Code\Identifiers( *Expression\FirstOperandI )
-        If Not FindMapElement( GenProgram\TypeTable\NamedTypes(), Name )
-          ;;;;TODO: Diagnostic
-          Debug "Cannot find type " + Name
-          Continue
-        EndIf
-        *Expression\Type = GenProgram\TypeTable\NamedTypes()
-        
-    EndSelect
-    
-  Next
+EndProcedure
+
+; Come up with a name for the type that can be used for debugging purposes.
+Procedure.s GenTypeName( *GenType.GenType )
+  
+  Select *GenType\TypeKind
+      
+    Case #NamedType
+      ProcedureReturn Code\Identifiers( Code\Definitions( *GenType\DefinitionIndex )\Name )
+      
+    Case #UnionType
+      ProcedureReturn "and(" + GenTypeName( GenTypePtr( *GenType\LeftOperandTypeId ) ) + "," + GenTypeName( GenTypePtr( *GenType\RightOperandTypeId ) ) + ")"
+      
+    Case #IntersectionType
+      ProcedureReturn "or(" + GenTypeName( GenTypePtr( *GenType\LeftOperandTypeId ) ) + "," + GenTypeName( GenTypePtr( *GenType\RightOperandTypeId ) ) + ")"
+      
+    Case #FunctionType
+      ProcedureReturn "fun(" + GenTypeName( GenTypePtr( *GenType\LeftOperandTypeId ) ) + "," + GenTypeName( GenTypePtr( *GenType\RightOperandTypeId ) ) + ")"
+      
+    Default
+      ProcedureReturn "<unknown>?!?!?!?"
+      
+  EndSelect
   
 EndProcedure
 
+; Finalizes the set of type IDs in the program and establishes
+; their subtype relationships.
 Procedure GenTypes()
   
+  ; First, assign a type to every expression in the program (both type
+  ; and value expressions).
+  Define ExpressionIndex.i
+  For ExpressionIndex = 0 To Code\ExpressionCount - 1
+    AssignTypeId( ExpressionIndex )
+  Next
+  
+  ; Next, add type instand to the output program and at the same time build the subtype matrix.
   Define.i TypeCount = GenProgram\TypeTable\TypeCount
   ReDim Program\Types( TypeCount )
   Program\TypeCount = TypeCount
-  
-  ; Allocate subtype matrix.
   GenProgram\TypeTable\SubtypeMatrix = AllocateMemory( ( TypeCount * TypeCount + 7 ) / 8 )
-  
   Define.i ObjectTypeId = GenProgram\TypeTable\ObjectTypeId
   Define.i TypeIndex
   For TypeIndex = 0 To TypeCount - 1
     
+    ; Add to program.
     Define.GenType *GenType = @GenProgram\TypeTable\Types( TypeIndex )
     Define.Type *Type = @Program\Types( TypeIndex )
+    *Type\Name = GenTypeName( *GenType )
     
-    If *GenType\TypeKind = #NamedType
-      *Type\Name = Code\Identifiers( Code\Definitions( *GenType\DefinitionIndex )\Name )
-    EndIf
+    ;;;;this needs to be iterative all the way to Object
     
     ; Establish subtype relationships.
     SetFirstIsSubtypeOfSecond( *GenType\Id, *GenType\Id ) ; Every type is a subtype of itself.
@@ -2444,10 +2626,12 @@ Procedure GenTypes()
   
 EndProcedure
 
-Procedure GenFunctions()
+Procedure GenFields()
 EndProcedure
 
-Procedure GenFields()
+; Generates code for each function and as a side-effect, typechecks each
+; value expression used in methods.
+Procedure GenFunctions()
 EndProcedure
 
 Procedure GenObjects()
@@ -2503,6 +2687,7 @@ Procedure TranslateProgram( WithLibraries.b )
   EndIf
   
   GenTypes()
+  GenFields()
   GenFunctions()
   GenObjects()
   GenAssets()
@@ -2644,26 +2829,46 @@ Procedure UpdateProgram( WithLibraries.b = #True )
 EndProcedure
 
 ProcedureUnit CanCompileSimpleProgram()
+
   Define.s Text = ~"type FirstType;\n" +
-                  ~"type SecondType : FirstType;\n"
+                  ~"type SecondType : FirstType;\n" +
+                  ~"type ThirdType;\n" +
+                  ~"type FourthType = FirstType | ThirdType;\n" +
+                  ~"type FifthType = ThirdType;\n" +
+                  ~"type SixthType = FourthType | SecondType;\n"
+  
   *Text = UTF8( Text )
   TextLength = Len( Text )
+  
   UpdateProgram( #False )
-  Assert( Program\TypeCount = 2 )
+  
+  Assert( Program\TypeCount = 5 )
+  Assert( ArraySize( Program\Types() ) = 5 )
   Assert( Program\Types( 0 )\Name = "first_type" )
   Assert( Program\Types( 1 )\Name = "second_type" )
-  Assert( GenProgram\TypeTable\TypeCount = 2 )
-  Assert( ArraySize( GenProgram\TypeTable\Types() ) >= 2 )
-  Assert( ArraySize( Program\Types() ) = 2 )
-  Assert( MapSize( GenProgram\TypeTable\NamedTypes() ) = 2 )
+  Assert( Program\Types( 2 )\Name = "third_type" )
+  Assert( Program\Types( 3 )\Name = "or(first_type,third_type)" )
+  Assert( Program\Types( 4 )\Name = "or(second_type,or(first_type,third_type))" )
+  
+  Assert( GenProgram\TypeTable\TypeCount = 5 )
+  Assert( ArraySize( GenProgram\TypeTable\Types() ) >= 5 )
+  
+  Assert( MapSize( GenProgram\TypeTable\NamedTypes() ) = 6 )
   Assert( GenProgram\TypeTable\NamedTypes( "first_type" ) = 1 )
   Assert( GenProgram\TypeTable\NamedTypes( "second_type" ) = 2 )
-  Assert( FirstIsSubtypeOfSecond( 1, 2 ) = #False )
-  Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )
-  Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )
-  Assert( FirstIsSubtypeOfSecond( 1, 1 ) = #True )
-  Assert( FirstIsSubtypeOfSecond( 2, 2 ) = #True )
+  Assert( GenProgram\TypeTable\NamedTypes( "third_type" ) = 3 )
+  Assert( GenProgram\TypeTable\NamedTypes( "fourth_type" ) = 4 )
+  Assert( GenProgram\TypeTable\NamedTypes( "fifth_type" ) = #INVALID_TYPE_ID ) ; Unused alias.
+  Assert( GenProgram\TypeTable\NamedTypes( "sixth_type" ) = #INVALID_TYPE_ID ) ; Unused alias.
+  
+  ;Assert( FirstIsSubtypeOfSecond( 1, 2 ) = #False )
+  ;Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )
+  ;Assert( FirstIsSubtypeOfSecond( 2, 1 ) = #True )
+  ;Assert( FirstIsSubtypeOfSecond( 1, 1 ) = #True )
+  ;Assert( FirstIsSubtypeOfSecond( 2, 2 ) = #True )
+  
   FreeMemory( *Text )
+  
 EndProcedureUnit
 
 ;==============================================================================
@@ -2914,7 +3119,12 @@ Procedure.s GenerateDocsAt( Path.s )
       ; Index #0 should always be the root '/'.
     Case 0
     Case 1
-      AppendString( @Builder, "<p>Welcome to UnityBasic!</p>" )
+      AppendString( @Builder, "<h1>dotBASIC</h1>" )
+      AppendString( @Builder, "<p>Welcome to <b>dotBASIC</b> &ndash; an advanced, game-oriented BASIC programming environment " +
+                              "built on <i>Unity DOTS</i> (Data-Oriented Tech Stack) technology.</p>" )
+      AppendString( @Builder, "<h2>Overview</h2>" )
+      AppendString( @Builder, "<p>This is a live programming environment. As you type and modify code on the left, the Unity player " +
+                              "running below this pane as well as the documentation in this pane are automatically updated.</p>" )
       
     Case 2
       
@@ -3111,7 +3321,7 @@ EndIf
 ;[X] Add DOTS to Unity project
 ;[X] Can add comments
 ;[X] Methods can have value parameters
-;[X] Can generate subtype matrix
+;[ ] Can generate subtype matrix
 ;[ ] Can generate and populate functions with methods
 ;[ ] Can invoke methods
 ;[ ] Can have conditional branches
@@ -3127,6 +3337,8 @@ EndIf
 
 ; ....
 
+;[ ] Can have type aliases
+;[ ] Can have method aliases
 ;[ ] Can write parameterized types
 ;[ ] Can instantiate parameterized types
 ;[ ] Can write parameterized methods
@@ -3145,6 +3357,7 @@ EndIf
 ;[ ] Syntax highlighting in text editor
 ;[ ] Auto-completion in text editor
 ;[ ] Make parser predictive and the syntax more liberal
+;[ ] Show indentation guides
 
 ; ....
 
@@ -3172,7 +3385,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 1946
-; FirstLine = 1899
+; CursorPosition = 2872
+; FirstLine = 2835
 ; Folding = --------------
 ; EnableXP

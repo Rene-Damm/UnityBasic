@@ -14,14 +14,14 @@ ABSTRACT TYPE Object;
             MUTABLE TYPE MutableString : String;
             IMMUTABLE TYPE ImmutableString : String;
 
-        |DESCRIPTION The universal value for 'true'.
-        IMMUTABLE OBJECT True : Literal;
+    |DESCRIPTION The universal value for 'true'.
+    IMMUTABLE OBJECT True;
 
-        |DESCRIPTION The universal value for 'false'.
-        IMMUTABLE OBJECT False : Literal;
+    |DESCRIPTION The universal value for 'false'.
+    IMMUTABLE OBJECT False;
 
-        |DESCRIPTION A truth value.
-        TYPE Boolean = True | False;
+    |DESCRIPTION A truth value.
+    TYPE Boolean = True | False;
 
     |CATEGORY Assets
     ABSTRACT TYPE Asset : Object;
