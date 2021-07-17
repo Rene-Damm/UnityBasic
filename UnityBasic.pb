@@ -1316,6 +1316,21 @@ Procedure.i ParseUnaryPostfixExpression( *Parser.Parser )
     ProcedureReturn -1
   EndIf
   
+  ; Check for dot expressions.
+  Define.b IsDotExpression = #False
+  SkipWhitespace( *Parser )
+  If MatchToken( *Parser, ".", 1, #True )
+    
+    Define.i SecondExpression = ParseBasicExpression( *Parser )
+    If SecondExpression <> -1
+      ; Note the inversion of the operands. "A.B" -> "B( A )"
+      MakeExpressionOp2I( DotExpr, #ApplyExpression, #INVALID_TYPE_ID, SecondExpression, FirstExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
+      IsDotExpression = #True
+      FirstExpression = DotExpr
+    EndIf
+    
+  EndIf
+  
   ;;;;REVIEW: should this be considered a binary expression instead?
   ; ATM we allow only parenthesized and tuple expressions to form apply expressions.
   ; With a more powerful parser, that could be changed but there's a lot of ambiguity
@@ -1324,8 +1339,17 @@ Procedure.i ParseUnaryPostfixExpression( *Parser.Parser )
       
     Define.i SecondExpression = ParseBasicExpression( *Parser )
     If SecondExpression <> -1
-      MakeExpressionOp2I( ApplyExpr, #ApplyExpression, #INVALID_TYPE_ID, FirstExpression, SecondExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
-      ProcedureReturn ApplyExpr
+      
+      ; If the left side is a dot expression, create a tuple expression. "A.B( C )" -> "B( A, C )"
+      If IsDotExpression
+        MakeExpressionOp2I( TupleExpression, #TupleExpression, #INVALID_TYPE_ID, Code\Expressions( FirstExpression )\SecondOperandI, SecondExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
+        Code\Expressions( FirstExpression )\SecondOperandI = TupleExpression
+        ProcedureReturn FirstExpression
+      Else
+        MakeExpressionOp2I( ApplyExpr, #ApplyExpression, #INVALID_TYPE_ID, FirstExpression, SecondExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
+        ProcedureReturn ApplyExpr
+      EndIf
+      
     EndIf
     
   EndIf
@@ -1745,7 +1769,8 @@ Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
   Parser\CurrentLine = 1
   Parser\CurrentColumn = 1
   Parser\CurrentExpressionContext = #ValueContext
-  Assert( Fn( @Parser ) = Expected )
+  Define.i ParserResult = Fn( @Parser )
+  Assert( ParserResult = Expected )
   FreeMemory( *Buffer )
 EndProcedure
 
@@ -1869,7 +1894,59 @@ ProcedureUnit CanParseApplyExpression()
   Assert( Code\Expressions( 2 )\SecondOperandI = 1 )
   Assert( Code\Expressions( 2 )\NextExpression = -1 )
 EndProcedureUnit
-  
+
+; A.B is equivalent to B( A )
+ProcedureUnit CanParseDotExpression()
+  ResetCode()
+  TestParseText( @ParseExpression(), "a.b", 2 )
+  Assert( Code\ExpressionCount = 3 )
+  Assert( Code\IdentifierCount = 2 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Identifiers( 1 ) = "b" )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = -1 ) ; These are not linked.
+  Assert( Code\Expressions( 1 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 1 )\NextExpression = -1 )
+  Assert( Code\Expressions( 2 )\Operator = #ApplyExpression )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 1 ) ; Note the inversion here.
+  Assert( Code\Expressions( 2 )\SecondOperandI = 0 )
+  Assert( Code\Expressions( 2 )\NextExpression = -1 )
+EndProcedureUnit
+
+; A.B( C ) is equivalent to B( A, C )
+ProcedureUnit CanParseDotExpressionWithArguments()
+  ResetCode()
+  TestParseText( @ParseExpression(), "a.b( c )", 2 )
+  Assert( Code\ExpressionCount = 5 )
+  Assert( Code\IdentifierCount = 3 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Identifiers( 1 ) = "b" )
+  Assert( Code\Identifiers( 2 ) = "c" )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = -1 ) ; These are not linked.
+  Assert( Code\Expressions( 1 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 1 )\NextExpression = -1 )
+  ; The reverse order of expressions here is because
+  ; the parser first sees the 'a.b' and then the '( c )'. It then modifies
+  ; the existing apply expression it created for 'a.b' after creating a new
+  ; tuple expression for '( a, c )'.
+  Assert( Code\Expressions( 2 )\Operator = #ApplyExpression )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 2 )\SecondOperandI = 4 )
+  Assert( Code\Expressions( 2 )\NextExpression = -1 )
+  Assert( Code\Expressions( 3 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 3 )\FirstOperandI = 2 )
+  Assert( Code\Expressions( 3 )\NextExpression = -1 )
+  Assert( Code\Expressions( 4 )\Operator = #TupleExpression )
+  Assert( Code\Expressions( 4 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 4 )\SecondOperandI = 3 )
+  Assert( Code\Expressions( 4 )\NextExpression = -1 )
+EndProcedureUnit
+
 ProcedureUnit CanParseIfStatementWithoutElse()
   ResetCode()
   TestParseText( @ParseStatement(), "if ( a ) return 123; end;", 1 )
@@ -2355,12 +2432,13 @@ Structure GenDispatchTreeNode
   *Method.GenMethod
   ArgumentTypeId.i
   ResultTypeId.i
-  Parent.i
-  FirstChild.i
-  NextSibling.i
-  FirstBefore.i
-  FirstAfter.i
-  FirstAround.i
+  Parent.l
+  FirstChild.l
+  NextSibling.l
+  FirstBefore.l
+  FirstAfter.l
+  FirstAround.l
+  CallWeightScore.l ; Sum of # of call sites that enter the function through this branch, each times weight for site (x10 in loop).
 EndStructure
 
 Structure GenDispatchTree
@@ -2396,7 +2474,13 @@ Structure GenTypeTable
   Map AliasToTypeExpression.i() ; Maps a name to an expression index.
 EndStructure
 
+Structure GenCallSite
+  *Function.GenFunction
+  DispatchNodeIndex.l
+EndStructure
+
 Structure GenFunctionTable
+  Array CallSites.GenCallSite( 0 ) ; Mirrors expression array.
   Map Functions.GenFunction()
 EndStructure
 
@@ -3274,6 +3358,7 @@ Procedure GenFunctions()
   Program\FunctionCount = FunctionCount
   
   ;{ Generate dispatch trees for all functions.
+  
   Define.i FunctionIndex = 0
   ForEach GenProgram\FunctionTable\Functions()
     
@@ -3290,6 +3375,20 @@ Procedure GenFunctions()
     FunctionIndex + 1
     
   Next
+  
+  ;}
+  
+  ;{ Resolve all call sites.
+  
+  Define.i ExpressionIndex
+  For ExpressionIndex = 0 To Code\ExpressionCount - 1
+    
+    Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
+    If *Expression\Type <> #ApplyExpression
+    EndIf
+    
+  Next
+  
   ;}
   
 EndProcedure
@@ -4145,6 +4244,9 @@ EndIf
 ;[X] Can generate subtype matrix
 ;[X] Can assign types to methods
 ;[X] Generate dispatch trees
+;[ ] Can codegen dispatch trees
+;[ ] Can have string literals
+;[X] Can write apply expressions in dot form
 ;[ ] Can generate a "match argument" sequence for one method
 ;[ ] Can translate a simple if statement followed by a return statement
 ;[ ] Can generate and populate functions with methods
@@ -4168,6 +4270,7 @@ EndIf
 ;[ ] Can instantiate parameterized types
 ;[ ] Can write parameterized methods
 ;[ ] Can invoke parameterized methods
+;[ ] Can generate specialized versions of functions
 
 ; ...
 
@@ -4210,8 +4313,8 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 4146
-; FirstLine = 3711
-; Folding = --------v--------
-; Markers = 2379,3132,3649
+; CursorPosition = 4248
+; FirstLine = 3796
+; Folding = --------v---------
+; Markers = 1322,2457,3384,3748
 ; EnableXP
