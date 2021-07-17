@@ -7,12 +7,12 @@
   <section name="data">
     <explorer view="..\AeonFlux_PureBasic\" pattern="0"/>
     <log show="1"/>
-    <lastopen date="2021-06-25 00:37" user="Rene Damm" host="VORKRAFT"/>
+    <lastopen date="2021-07-16 22:59" user="Rene Damm" host="VORKRAFT"/>
   </section>
   <section name="files">
     <file name="UnityBasic.pb">
       <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
-      <fingerprint md5="8b89b2124c0438e794cb4d82fab89eaa"/>
+      <fingerprint md5="209d207ec94913c3ae618dbb93b90822"/>
     </file>
   </section>
   <section name="targets">

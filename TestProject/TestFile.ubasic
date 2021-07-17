@@ -2,7 +2,7 @@
 
 |PRODUCT MyProduct
 |COMPANY MyCompany
-|PRAGMA NamingConvention( pascal )
+|PRAGMA NamingConvention( Pascal )
 |PRAGMA Indentation( 4, Spaces )
 |PRAGMA Debug( writecode )
 PROGRAM FirstProgram;
@@ -15,6 +15,10 @@ TYPE OtherType;
 TYPE Next;
 
 |DESCRIPTION The fourth type!!
+|DESCRIPTION Is so cool.
+|DESCRIPTION
+|DESCRIPTION More stuff.
+|DETAILS Just in case you need to know more.
 TYPE Fourth;
 
 METHOD MyMethod() : INTEGER

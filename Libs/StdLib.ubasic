@@ -70,3 +70,24 @@ END;
 |CATEGORY Systems
 METHOD Destroy( System )
 END;
+
+////REVIEW: how does this handle short-curcuit evaluation?
+// Operator methods. Operator symbols are translated into method names (e.g. "1 + 1" is equivalent to "Add(1, 1)").
+// This means that there's three ways to write any such operation:
+//   1 + 1
+//   Add( 1, 1 )
+//   1.Add( 1 )
+
+METHOD Not( True ) : False
+    RETURN False;
+END;
+
+METHOD Not( False ) : True
+    RETURN True;
+END;
+
+|ICALL IntAdd
+METHOD Add( Integer, Integer ) : Integer END;
+
+|ICALL IntSubtract
+METHOD Subtract( Integer, Integer ) : Integer END;

@@ -22,9 +22,9 @@ Global.s DocURL = "http://127.0.0.1:" + Str( #DOC_SERVER_PORT )
 #NEWLINE = 10
 #RETURN = 13
 #EQUALS = 61
-  
+
 ;==============================================================================
-; Initialize.
+;-== UI Setup.
 
 InitScintilla()
 InitNetwork()
@@ -139,7 +139,7 @@ ScintillaSendMessage( Scintilla, #SCI_SETINDENTATIONGUIDES, #SC_IV_REAL )
 SetActiveGadget( Scintilla )
 
 ;==============================================================================
-; Networking and child processes.
+;-== Networking And child processes.
 
 #MAX_MESSAGE_LENGTH = ( 32 * 1024 )
 
@@ -230,7 +230,7 @@ Procedure FinishBatchSend()
 EndProcedure
 
 ;==============================================================================
-; Utilities.
+;-== Utilities.
 
 Procedure.i SplitString( Array Split.s( 1 ), String.s, Delimiter.s )
   
@@ -288,6 +288,10 @@ Procedure FreeStringBuilder( *Builder.StringBuilder )
   *Builder\Buffer = #Null
   *Builder\Length = 0
   *Builder\Capacity = 0
+EndProcedure
+
+Procedure ResetStringBuilder( *Builder.StringBuilder )
+  *Builder\Length = 0
 EndProcedure
 
 Procedure.s GetString( *Builder.StringBuilder, FreeBuilder.b = #True )
@@ -404,7 +408,8 @@ ProcedureUnit CanFormatSimpleHTTPResponse()
 EndProcedureUnit
 
 ;==============================================================================
-  
+;-== Abstract syntax.
+
 ;;;;TODO: figure out how to deal with separate files feeding into inputs
 Structure TextRegion
   LeftPos.i
@@ -488,7 +493,7 @@ Enumeration Operator
 EndEnumeration
 
 Enumeration ExpressionContext
-  #ValueContext
+  #ValueContext = 1
   #TypeContext
 EndEnumeration
 
@@ -508,7 +513,7 @@ Structure Expression
 EndStructure
 
 Enumeration StatementKind
-  #ExpressionStatement
+  #ExpressionStatement = 1
   #ReturnStatement
   #YieldStatement
   #LoopStatement
@@ -529,7 +534,7 @@ Structure Statement
 EndStructure
 
 Enumeration DefinitionKind
-  #TypeDefinition
+  #TypeDefinition = 1
   #MethodDefinition
   #FieldDefinition
   #FeatureDefinition
@@ -708,8 +713,29 @@ Procedure.s DefinitionKindToString( DefinitionKind.i )
   EndSelect
 EndProcedure
 
+Procedure.i FindAnnotation( *Definition.Definition, AnnotationKind.i )
+  
+  Define.i AnnotationIndex = *Definition\FirstAnnotation
+  While AnnotationIndex <> -1
+    
+    If Code\Annotations( AnnotationIndex )\AnnotationKind = AnnotationKind
+      ProcedureReturn AnnotationIndex
+    EndIf
+    
+    AnnotationIndex = Code\Annotations( AnnotationIndex )\NextAnnotation
+    
+  Wend
+  
+  ProcedureReturn -1
+  
+EndProcedure
+
+Procedure HasAnnotation( *Definition.Definition, AnnotationKind.i )
+  ProcedureReturn Bool( FindAnnotation( *Definition, AnnotationKind ) <> -1 )
+EndProcedure
+
 ;==============================================================================
-; Parser.
+;-== Parsing.
 ;;;;TODO: put this on a thread
 
 Structure Parser
@@ -985,7 +1011,7 @@ Procedure ExpectSymbol( *Parser.Parser, Symbol.s, Length.i )
   SkipWhitespace( *Parser )
   If Not MatchToken( *Parser, Symbol, Length, #True )
     ;;;;TODO: diagnose
-    Debug "Expecting " + Symbol + " but got " + Chr( PeekB( *Parser\Position ) )
+    Debug Str( *Parser\CurrentLine ) + ": Expecting " + Symbol + " but got " + Chr( PeekB( *Parser\Position ) )
   EndIf
 EndProcedure
 
@@ -1130,6 +1156,8 @@ Procedure.i ParseAnnotation( *Parser.Parser )
     AnnotationKind = #CategoryAnnotation
   ElseIf MatchToken( *Parser, "pragma", 6 )
     AnnotationKind = #PragmaAnnotation
+  ElseIf MatchToken( *Parser, "icall", 5 )
+    AnnotationKind = #IcallAnnotation
   ElseIf MatchToken( *Parser, "product", 7 )
     AnnotationKind = #ProductAnnotation
   ElseIf MatchToken( *Parser, "company", 7 )
@@ -1212,6 +1240,12 @@ Procedure.i ParseBasicExpression( *Parser.Parser )
     
     Type = #IntegerLiteralType
     FirstOperandI = IntegerPart
+    
+  CompilerIf #False
+  ElseIf Char = '"'
+    
+    ; Strings.
+  CompilerEndIf
     
   ElseIf IsAlpha( Char ) Or Char = '_'
     
@@ -1695,6 +1729,8 @@ Procedure ParseText()
   
 EndProcedure
 
+;{ TESTS
+
 Prototype.i ParseFunction( *Parser.Parser )
 
 Procedure TestParseText( Fn.ParseFunction, Text.s, Expected.i = #True )
@@ -1744,7 +1780,7 @@ ProcedureUnit CanParseIdentifier()
   Assert( PeekI( FindMapElement( Code\IdentifierTable(), "foo_bar" ) ) = 0 )
 EndProcedureUnit
 
-ProcedureUnit CanParseIntegerLiteralExpression()
+ProcedureUnit CanParseIntegerLiteral()
   ResetCode()
   TestParseText( @ParseExpression(), "01234", 0 )
   Assert( Code\ExpressionCount = 1 )
@@ -1753,6 +1789,18 @@ ProcedureUnit CanParseIntegerLiteralExpression()
   Assert( Code\Expressions( 0 )\Type = #IntegerLiteralType )
   Assert( Code\Expressions( 0 )\FirstOperandI = 1234 )
 EndProcedureUnit
+
+CompilerIf #False
+ProcedureUnit CanParseStringLiteral()
+  ResetCode()
+  TestParseText( @ParseExpression(), ~"  \"abc\" ", 0 )
+  Assert( Code\ExpressionCount = 1 )
+  Assert( Code\Expressions( 0 )\Operator = #LiteralExpression )
+  Assert( Code\Expressions( 0 )\Context = #ValueContext )
+  Assert( Code\Expressions( 0 )\Type = #StringLiteralType )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 1234 )
+EndProcedureUnit
+CompilerEndIf  
 
 ProcedureUnit CanParseNameExpression()
   ResetCode()
@@ -2069,9 +2117,11 @@ ProcedureUnit CanParseSimpleProgram()
   Assert( Code\Annotations( 1 )\AnnotationText = "MyCompany" )
   Assert( Code\Annotations( 1 )\NextAnnotation = -1 )
 EndProcedureUnit
+  
+;}
 
 ;==============================================================================
-; Code generation and semantic analysis.
+;-== Codegen and semantic analysis.
 ;;;;TODO: put this stuff on a thread
 
 Structure Asset
@@ -2092,7 +2142,7 @@ Enumeration BuiltinType
 EndEnumeration
 
 EnumerationBinary TypeFlags
-  #TypeIsArray
+  #TypeIsArray ; Used for "normal" arrays as well as strings.
   #TypeIsTuple
 EndEnumeration
 
@@ -2109,32 +2159,79 @@ Structure Type
 EndStructure
 
 Enumeration InstructionCode
+  
+  ; Invocation insns.
   #CallInsn = 1 ; Call function.
-  #ICallInsn ; Call intrinsic.
-  #BranchInsn
-  #JumpInsn
-  #AddInsn
-  #SubtractInsn
-  #MultiplyInsn
-  #DivideInsn
+  #ICallInsn    ; Call intrinsic.
+  #YieldInsn
+  #ReturnInsn
+  
+  ; Memory insns.
+  ; Store is the only way of changing state.
   #LoadInsn
-  #StoreInsn ; Void value instruction.
+  #StoreInsn ; No value.
+  
+  ; Block insns.
+  #BlockInsn ; With count of instructions comprising the block.
+  #ExitInsn ; With count of blocks to exit.
+  
+  ; Guard insns.
+  ; These can only appear right after a BeginBlockInsn.
+  ; A sequence of these will stack. For any one block, must all be the same type of guards, though.
+  #ConditionalInsn ; Compares first arg to True or False singleton. Second arg is flags.
+  #CatchInsn
+  #TypecaseInsn ; No subtyping. Checks for exact type ID match on given object. First arg is value, second arg is type ID.
+  #LoopInsn ; Sets up iterator in current block. ;;;;REVIEW: should this be a kind of call insn?
+  
 EndEnumeration
+
+EnumerationBinary ConditionalInsnFlags
+  #IsNotCompare
+  #IsAndCompare
+  #IsOrCompare
+EndEnumeration
+
+EnumerationBinary LoadInsnFlags
+  #IsSlotLoad ; Load current value of slot in object. First arg is object. Second arg is slot index (if array object, -1 is length slot, rest is element slots).
+  #IsIntConstantLoad ; First arg is constant.
+  #IsFloatConstantLoad ; First arg is constant.
+  #IsObjectLoad ; Load reference to object from globals. First arg is index.
+EndEnumeration
+
+EnumerationBinary StoreInsnFlags
+  #IsSlotStore
+EndEnumeration
+
+;;;;how do I get integer/float operations cheap? (cheap calls / math ops, cheap representation)
+
+;;;;it makes sense for as much optimization as possible to happen on the IDE side instead of the player side
 
 Enumeration Intrinsic
+  
   #IntrDebugLog = 1
   #IntrDebugBreak
+  
+  ;;;;REVIEW: should the types here be implicit??
+  #IntrIntAdd
+  #IntrIntSubtract
+  #IntrIntMultiply
+  #IntrIntDivide
+  #IntrIntModulo
+  
+  #IntrFloatAdd
+  #IntrFloatSubtract
+  #IntrFloatMultiply
+  #IntrFloatDivide
+  #intrFloatModulo
+  
 EndEnumeration
 
-EnumerationBinary InstructionFlags
-  #InsnIsInteger
-  #InsnIsFloat
-  #InsnIsWide ; Makes int or float 64bit.
-  #InsnIsVectored
-EndEnumeration
-
-; Instructions are fixed-width SSA.
+; Instructions are fixed-width SSA for a very simple, stack-less VM somewhat inspired by SmallTalk.
 Structure Instruction
+  Opcode.b
+  Operand1.b
+  Operand2.b
+  Operand3.b
 EndStructure
 
 ; All functions are fully symmetric, i.e. 1 argument value, 1 result value.
@@ -2150,8 +2247,10 @@ EndStructure
 
 Structure Object
   Type.i
-  ConstructorFunction.i ;;??
+  FirstByte.i ; Memory state does not necessary correspond to layout runtime uses. Contains no type tags.
 EndStructure
+
+;;;;REVIEW: transmit instructions and initial state both as one big memory blob?
 
 Structure Program
   Name.s
@@ -2162,12 +2261,14 @@ Structure Program
   TypeCount.i
   ObjectCount.i
   InstructionCount.i
+  InitialMemorySize.i
   Array Assets.Asset( 0 )
   Array Functions.Function( 0 )
   Array Types.Type( 0 )
   Array Fields.Field( 0 )
   Array Objects.Object( 0 )
   Array Instructions.Instruction( 0 )
+  Array InitialMemory.b( 0 )
 EndStructure
 
 ; This is the compiled program.
@@ -2226,7 +2327,11 @@ EnumerationBinary GenMethodFlags
   #IsReadMethod
   #IsWriteMethod
   #IsDefaultMethod
-  #IsIntrinsic
+  #IsAfterMethod
+  #IsBeforeMethod
+  #IsAroundMethod
+  #IsAbstractMethod
+  #IsIntrinsicMethod
 EndEnumeration
 
 ; A method implements a function for one specific argument type.
@@ -2235,7 +2340,32 @@ EndEnumeration
 Structure GenMethod
   DefinitionIndex.i
   MethodFlags.i
-  FunctionType.i
+  ArgumentTypeId.i
+  ResultTypeId.i
+EndStructure
+
+#INVALID_NODE_INDEX = -1
+
+; Each node in the dispatch tree has an associated function type.
+; Each such function type dictates the argument and result types for the entire branch of the tree.
+; Each child node may expect a more specific type of argument and may in turn return a more specific type of result.
+; Both these types act covariantly as we go down the tree.
+; This means that a node's function type is *not* a subtype of its parent node's function type.
+Structure GenDispatchTreeNode
+  *Method.GenMethod
+  ArgumentTypeId.i
+  ResultTypeId.i
+  Parent.i
+  FirstChild.i
+  NextSibling.i
+  FirstBefore.i
+  FirstAfter.i
+  FirstAround.i
+EndStructure
+
+Structure GenDispatchTree
+  NodeCount.i
+  Array Nodes.GenDispatchTreeNode( 0 )
 EndStructure
 
 ; A collection of methods that all have the same name.
@@ -2243,6 +2373,7 @@ EndStructure
 Structure GenFunction
   Name.s
   MethodCount.i
+  DispatchTree.GenDispatchTree
   Array Methods.GenMethod( 0 )
 EndStructure
 
@@ -2257,6 +2388,8 @@ Structure GenTypeTable
   FloatTypeId.i
   ImmutableStringTypeId.i
   NothingTypeId.i
+  TrueTypeId.i
+  FalseTypeId.i
   *SubtypeMatrix ; 2-dimensional typecount*typecount 2-bitfield matrix with subtype flags (0=not initialized, 1=is not subtype, 2=is subtype).
   Array Types.GenType( 0 )
   Map NamedTypes.i() ; Maps a name to a type ID. These are the "primitive" types all other types are built from. Also contains aliases.
@@ -2288,6 +2421,14 @@ EndMacro
 #SUBTYPE_TRUE = 2
 
 Macro SetupSubtypeMatrixIndex( FirstTypeId, SecondTypeId )
+  CompilerIf #PB_Compiler_Debugger
+    If FirstTypeId = #INVALID_TYPE_ID
+      DebuggerError( "FirstTypeId is invalid" )
+    EndIf
+    If SecondTypeId = #INVALID_TYPE_ID
+      DebuggerError( "SecondTypeId is invalid" )
+    EndIf
+  CompilerEndIf
   Define.i FirstTypeId#Index = FirstTypeId - 1
   Define.i SecondTypeId#Index = SecondTypeId - 1
   Define.i SubtypeMatrixIndex = FirstTypeId#Index * GenProgram\TypeTable\TypeCount + SecondTypeId#Index
@@ -2352,10 +2493,17 @@ Procedure.b SetFirstIsSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
 EndProcedure
 
 ; Determine if 'FirstTypeId <: SecondTypeId' for any type relationship other than identity (FirstTypeId = SecondTypeId)
-; and direct derivation (FirstTypeId : SecondTypeId).
+; and direct derivation (FirstTypeId : SecondTypeId). The latter two relationships we initialize directly in GenTypes().
 Procedure.b ComputeIsFirstSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
   
+  ; Everything is a subtype of Object.
+  If SecondTypeId = GenProgram\TypeTable\ObjectTypeId
+    ProcedureReturn #True
+  EndIf
+  
+  Define.GenType *FirstGenType = GenTypePtr( FirstTypeId )
   Define.GenType *SecondGenType = GenTypePtr( SecondTypeId )
+  
   Select *SecondGenType\TypeKind
       
     Case #IntersectionType
@@ -2364,14 +2512,28 @@ Procedure.b ComputeIsFirstSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
     Case #UnionType
       ProcedureReturn Bool( FirstIsSubtypeOfSecond( FirstTypeId, *SecondGenType\LeftOperandTypeId ) And FirstIsSubtypeOfSecond( FirstTypeId, *SecondGenType\RightOperandTypeId ) )
       
+    Case #FunctionType
+      ; We only test for relationships between function types here. Other type relationships
+      ; from function types to other kinds of types can be established explicitly in code.
+      If *FirstGenType\TypeKind = #FunctionType
+        ; Contravariant argument, covariant result.
+        ProcedureReturn Bool( FirstIsSubtypeOfSecond( *SecondGenType\LeftOperandTypeId, *FirstGenType\LeftOperandTypeId ) And FirstIsSubtypeOfSecond( *FirstGenType\RightOperandTypeId, *SecondGenType\RightOperandTypeId ) )
+      EndIf
+      
+    Case #TupleType
+      
+      If *FirstGenType\TypeKind = #TupleType
+        ProcedureReturn Bool( FirstIsSubtypeOfSecond( *FirstGenType\LeftOperandTypeId, *SecondGenType\LeftOperandTypeId ) And FirstIsSubtypeOfSecond( *FirstGenType\RightOperandTypeId, *SecondGenType\RightOperandTypeId ) )
+      EndIf
       
   EndSelect
   
-  Define.GenType *FirstGenType = GenTypePtr( FirstTypeId )
   Select *FirstGenType\TypeKind
       
     Case #NamedType
-      ProcedureReturn FirstIsSubtypeOfSecond( *FirstGenType\LeftOperandTypeId, SecondTypeId )
+      If FirstTypeId <> GenProgram\TypeTable\ObjectTypeId
+        ProcedureReturn FirstIsSubtypeOfSecond( *FirstGenType\LeftOperandTypeId, SecondTypeId )
+      EndIf
       
   EndSelect
 
@@ -2401,8 +2563,9 @@ Procedure.i MakeCombinedGenType( CombinedTypeKind.i, LeftTypeId.i, RightTypeId.i
   
   ; NOTE: We allow combining a type with itself.
   
-  ; We always combine the type with the *higher* ID *into* the type with the *lower* one.
-  If LeftTypeId > RightTypeId
+  ; For transitive operators, we always combine the type with the *higher* ID
+  ; *into* the type With the *lower* one.
+  If ( CombinedTypeKind = #UnionType Or CombinedTypeKind = #IntersectionType ) And LeftTypeId > RightTypeId
     Swap LeftTypeId, RightTypeId
   EndIf
   
@@ -2449,11 +2612,10 @@ EndProcedure
 ; Assiging types is recursive.
 Declare.i AssignTypeId( ExpressionIndex.i )
 
-Procedure.i LookupNamedType( NameIndex.i )
+Procedure.i LookupNamedTypeFromString( Name.s )
   
   Define.i TypeId = #INVALID_TYPE_ID
   
-  Define.s Name = Code\Identifiers( NameIndex )
   If Not FindMapElement( GenProgram\TypeTable\NamedTypes(), Name )
     ;;;;TODO: Diagnostic
     Debug "Cannot find type " + Name
@@ -2475,6 +2637,13 @@ Procedure.i LookupNamedType( NameIndex.i )
   EndIf
   
   ProcedureReturn TypeId
+  
+EndProcedure
+
+Procedure.i LookupNamedType( NameIndex.i )
+  
+  Define.s Name = Code\Identifiers( NameIndex )
+  ProcedureReturn LookupNamedTypeFromString( Name )
   
 EndProcedure
 
@@ -2567,7 +2736,13 @@ EndProcedure
 ;;;;TODO: would be more efficient to fold this into the parsing pass
 Procedure GenCollect()
   
-  ; Collect definitions.
+  ; Local F : ( True | False ) -> String
+  ; Local G : Object -> Object
+  
+  ; invalid: F = G
+  ; invalid: G = F
+  
+  ;{ Collect definitions.
   ; As a side-effect, we assign a unique type ID to every named type definition that isn't an alias. This
   ; is the first pass of type generation which essentially puts the starting set of "primitive" type IDs
   ; in place. All other type IDs are combinations synthesized from this set of primitives.
@@ -2629,6 +2804,12 @@ Procedure GenCollect()
           Case "nothing"
             GenProgram\TypeTable\NothingTypeId = *GenType\Id
             
+          Case "true"
+            GenProgram\TypeTable\TrueTypeId = *GenType\Id
+                        
+          Case "false"
+            GenProgram\TypeTable\FalseTypeId = *GenType\Id
+            
         EndSelect
         
       Case #MethodDefinition
@@ -2649,6 +2830,20 @@ Procedure GenCollect()
         
         Define.GenMethod *GenMethod = @*GenFunction\Methods( MethodIndex )
         *GenMethod\DefinitionIndex = DefinitionIndex
+        
+        ; Set flags.
+        If *Definition\Flags & #IsAbstract
+          *GenMethod\MethodFlags | #IsAbstractMethod
+        EndIf
+        If *Definition\Flags & #IsBefore
+          *GenMethod\MethodFlags | #IsBeforeMethod
+        EndIf
+        If *Definition\Flags & #IsAfter
+          *GenMethod\MethodFlags | #IsAfterMethod
+        EndIf
+        If *Definition\Flags & #IsAround
+          *GenMethod\MethodFlags | #IsAroundMethod
+        EndIf
         
       Case #ProgramDefinition
         
@@ -2689,6 +2884,8 @@ Procedure GenCollect()
               EndIf
               
               Select LCase( Pragma )
+                  
+                ;;;;TODO: allow naming convention to be specific by example (e.g. "LikeThis" or "likeThis")
                   
                 Case "namingconvention"
                   Select LCase( Argument )
@@ -2745,6 +2942,7 @@ Procedure GenCollect()
     EndSelect
     
   Next
+  ;}
   
 EndProcedure
 
@@ -2775,6 +2973,10 @@ Procedure.s GenTypeName( *GenType.GenType )
   
 EndProcedure
 
+Procedure.s GenTypeNameById( TypeId.i )
+  ProcedureReturn GenTypeName( GenTypePtr( TypeId ) )
+EndProcedure
+
 Procedure.i GenTypeForParameters( ParameterIndex.i )
   
   Define.Parameter *Parameter = @Code\Parameters( ParameterIndex )
@@ -2792,7 +2994,8 @@ Procedure.i GenTypeForParameters( ParameterIndex.i )
   ; If there's more parameters following, create a tuple type.
   If *Parameter\NextParameter <> -1
     Define.i RightTypeId = GenTypeForParameters( *Parameter\NextParameter )
-    TypeId = MakeCombinedGenType( #TupleType, TypeId, RightTypeId )
+    Define.GenType *TupleType = MakeCombinedGenType( #TupleType, TypeId, RightTypeId )
+    TypeId = *TupleType\Id
   EndIf
   
   ProcedureReturn TypeId
@@ -2810,8 +3013,8 @@ Procedure GenTypes()
     AssignTypeId( ExpressionIndex )
   Next
   
-  ; Next, assign a type to every method in the program. This will likey
-  ; add additional function types to the program (as well as potentially other kinds of types).
+  ; Next, assign a type to every method in the program. This may add
+  ; additional types to the program.
   ForEach GenProgram\FunctionTable\Functions()
     
     Define.GenFunction *GenFunction = GenProgram\FunctionTable\Functions()
@@ -2834,19 +3037,14 @@ Procedure GenTypes()
         ResultTypeId = Code\Expressions( ResultTypeExpressionIndex )\Type
       EndIf
       
-      ; ( a ) => a
-      ; ( a, b ) => a * b
-      ; ( a, b, c ) => ( a * b ) * c
-      
       ; Argument type.
       Define FirstValueParameterIndex = *Definition\FirstValueParameter
       If FirstValueParameterIndex <> -1
         ArgumentTypeId = GenTypeForParameters( FirstValueParameterIndex )
       EndIf
       
-      ; Final function type.
-      Define.i FunctionType = MakeCombinedGenType( #FunctionType, ArgumentTypeId, ResultTypeId )
-      *GenMethod\FunctionType = FunctionType
+      *GenMethod\ArgumentTypeId = ArgumentTypeId
+      *GenMethod\ResultTypeId = ResultTypeId
       
     Next
     
@@ -2896,11 +3094,203 @@ EndProcedure
 Procedure GenFields()
 EndProcedure
 
+Procedure.i AddDispatchTreeNode( *DispatchTree.GenDispatchTree, Parent.i, ArgumentTypeId.i, ResultTypeId.i, *GenMethod.GenMethod = #Null )
+  
+  If ArraySize( *DispatchTree\Nodes() ) = *DispatchTree\NodeCount
+    ReDim *DispatchTree\Nodes( *DispatchTree\NodeCount + 128 )
+  EndIf
+  
+  Define.i Index = *DispatchTree\NodeCount
+  *DispatchTree\NodeCount + 1
+  
+  Define.GenDispatchTreeNode *Ptr = @*DispatchTree\Nodes( Index )
+  
+  *Ptr\ArgumentTypeId = ArgumentTypeId
+  *Ptr\ResultTypeId = ResultTypeId
+  *Ptr\Parent = Parent
+  *Ptr\FirstChild = #INVALID_NODE_INDEX
+  *Ptr\FirstAfter = #INVALID_NODE_INDEX
+  *Ptr\FirstBefore = #INVALID_NODE_INDEX
+  *Ptr\FirstAround = #INVALID_NODE_INDEX
+  
+  If Parent <> #INVALID_NODE_INDEX
+    *Ptr\NextSibling = *DispatchTree\Nodes( Parent )\FirstChild
+    *DispatchTree\Nodes( Parent )\FirstChild = Index
+  Else
+    *Ptr\NextSibling = #INVALID_NODE_INDEX
+  EndIf
+  
+  ProcedureReturn Index
+  
+EndProcedure
+
+; A dispatch tree puts all methods contained in a given function into a total ordering.
+Procedure GenDispatchTree( *GenFunction.GenFunction )
+  
+  Define.GenDispatchTree *DispatchTree = @*GenFunction\DispatchTree
+  
+  ; Add root node representing Object->Object.
+  AddDispatchTreeNode( *DispatchTree, #INVALID_NODE_INDEX, GenProgram\TypeTable\ObjectTypeId, GenProgram\TypeTable\ObjectTypeId )
+  
+  ; Go through each method in the function and find or create the node for it.
+  Define.i MethodIndex
+  For MethodIndex = 0 To *GenFunction\MethodCount - 1
+    
+    Define.GenMethod *GenMethod = @*GenFunction\Methods( MethodIndex )
+    
+    ; Walk down the tree looking for where the node for this method goes.
+    Define.i CurrentNodeIndex = 0 ; Start with Object->Object.
+    While #True
+      
+      Define.GenDispatchTreeNode *Node = @*DispatchTree\Nodes( CurrentNodeIndex )
+      Define.b IsBeforeAfterAroundMethodToAddToNode = #False
+      
+      If *GenMethod\ArgumentTypeId = *Node\ArgumentTypeId
+        
+        ; The node has *exactly* the type we're looking for. Might be a node we inserted
+        ; without having an actual method yet (happens for the Object->Object root node that we create
+        ; automatically but also for after/before/around methods). If Not, this Case is only okay If the
+        ; current method is after/before/around. Otherwise, we have a duplicate definition.
+        
+        If ( *GenMethod\MethodFlags & ( #IsAfter | #IsBefore | #IsAround ) ) = 0
+          ;;;;TODO: check result type
+          ; It's not an after/before/around method.
+          If *Node\Method <> #Null
+            ;;;;TODO: diagnose duplicate method implementation
+            Debug "Duplicate method definition for function " + *GenFunction\Name
+          Else
+            ; "Claim" this node.
+            *Node\Method = *GenMethod
+            *Node\ResultTypeId = *GenMethod\ResultTypeId
+          EndIf
+          Break
+        Else
+          IsBeforeAfterAroundMethodToAddToNode = #True
+        EndIf
+        
+      Else
+        
+        If FirstIsSubtypeOfSecond( *GenMethod\ArgumentTypeId, *Node\ArgumentTypeId )
+          
+          Define.b HaveFoundNode = #False
+          
+          ; If we have children, can be that we simply have to descend into them. However,
+          ; can also be that we have to insert us as an intermediate node in-between the
+          ; current parent and one or more of the children.
+          
+          Define.i ChildIndex = *Node\FirstChild
+          While ChildIndex <> #INVALID_NODE_INDEX
+            
+            Define.GenDispatchTreeNode *Child = @*DispatchTree\Nodes( ChildIndex )
+            
+            If FirstIsSubtypeOfSecond( *GenMethod\ArgumentTypeId, *Child\ArgumentTypeId )
+              
+              ; Descend into child node.
+              ; NOTE: This branch also takes care of looking at two identical types.
+              HaveFoundNode = #True
+              CurrentNodeIndex = ChildIndex
+              Break
+              
+            ElseIf FirstIsSubtypeOfSecond( *Child\ArgumentTypeId, *GenMethod\ArgumentTypeId )
+              
+              ; We're a supertype of the child's type. We need to insert ourselves
+              ; in-between. This may apply to other children of the current parent as well.
+              Define.i NewNodeIndex = AddDispatchTreeNode( *DispatchTree, CurrentNodeIndex, *GenMethod\ArgumentTypeId, *GenMethod\ResultTypeId )
+              Define.GenDispatchTreeNode *NewNode = @*DispatchTree\Nodes( NewNodeIndex )
+              HaveFoundNode = #True
+              
+              ; Go through all the children of the parent and move all of the ones that
+              ; are subtypes to below our new node.
+              ChildIndex = *NewNode\NextSibling ; *Node\FirstChild is == NewNodeIndex and NextSibling is what used to be FirstChild.
+              *Node\FirstChild = #INVALID_NODE_INDEX ; We'll rebuild the child list on the parent.
+              *NewNode\NextSibling = #INVALID_NODE_INDEX
+              While ChildIndex <> #INVALID_NODE_INDEX
+                
+                *Child = @*DispatchTree\Nodes( ChildIndex )
+                Define.i NextChildIndex = *Child\NextSibling
+                
+                If FirstIsSubtypeOfSecond( *Child\ArgumentTypeId, *GenMethod\ArgumentTypeId )
+                  
+                  ; Add it to our new node's children.
+                  
+                  *Child\Parent = NewNodeIndex
+                  *Child\NextSibling = *NewNode\FirstChild
+                  *NewNode\FirstChild = ChildIndex
+                  
+                Else
+                  
+                  ; Add it to the parent's children.
+                  *Child\NextSibling = *Node\FirstChild
+                  *Node\FirstChild = ChildIndex
+                  
+                EndIf
+                
+                ChildIndex = NextChildIndex
+                
+              Wend
+              
+              Break
+              
+            EndIf
+            
+            ChildIndex = *Child\NextSibling
+            
+          Wend
+          
+          ; If at this point, we have found a node arrangement, just create a new node
+          ; for the current method and insert us.
+          If Not HaveFoundNode
+            Define.i NewNodeIndex = AddDispatchTreeNode( *DispatchTree, CurrentNodeIndex, *GenMethod\ArgumentTypeId, *GenMethod\ResultTypeId )
+            *DispatchTree\Nodes( NewNodeIndex )\Method = *GenMethod
+            Break
+          Else
+            
+          EndIf
+          
+        Else
+          DebuggerError( "Error... we're in a branch of the dispatch tree where the current argument type is no longer a subtype! " + GenTypeNameById( *GenMethod\ArgumentTypeId ) + " <! " + GenTypeNameById( *Node\ArgumentTypeId ) )
+          Break
+        EndIf
+        
+      EndIf
+      
+      If IsBeforeAfterAroundMethodToAddToNode
+        ;;;;TODO: actually add to node
+        Break
+      EndIf
+      
+    Wend
+    
+  Next
+  
+EndProcedure
+
 ; Generates code for each function and as a side-effect, typechecks each
 ; value expression used in methods.
 Procedure GenFunctions()
   
-
+  Define.i FunctionCount = MapSize( GenProgram\FunctionTable\Functions() )
+  ReDim Program\Functions( FunctionCount )
+  Program\FunctionCount = FunctionCount
+  
+  ;{ Generate dispatch trees for all functions.
+  Define.i FunctionIndex = 0
+  ForEach GenProgram\FunctionTable\Functions()
+    
+    Define.GenFunction *GenFunction = GenProgram\FunctionTable\Functions()
+    Define.Function *Function = @Program\Functions( FunctionIndex )
+    
+    *Function\Name = *GenFunction\Name
+    
+    ; Create a dispatch tree for the function.
+    GenDispatchTree( *GenFunction )
+    
+    ; every call side specifies the branch of the dispatch tree at which it wants to enter a function
+    
+    FunctionIndex + 1
+    
+  Next
+  ;}
   
 EndProcedure
 
@@ -2956,6 +3346,14 @@ Procedure TranslateProgram( WithLibraries.b )
       Debug "Nothing type missing"
       ProcedureReturn
     EndIf
+    If GenProgram\TypeTable\TrueTypeId = #INVALID_TYPE_ID
+      Debug "True type missing"
+      ProcedureReturn
+    EndIf
+    If GenProgram\TypeTable\FalseTypeId = #INVALID_TYPE_ID
+      Debug "False type missing"
+      ProcedureReturn
+    EndIf
   EndIf
   
   GenTypes()
@@ -2972,6 +3370,34 @@ EndProcedure
 
 Procedure.s ToTypeMessage( *Type.Type )
   ProcedureReturn "t|" + *Type\Name
+EndProcedure
+
+Procedure.s ToFunctionMessage( *Function.Function )
+  ProcedureReturn "f|" + *Function\Name
+EndProcedure
+
+Procedure.s ToInstructionMessage( *Instruction.Instruction )
+  
+  Define.s Insn
+  Select *Instruction\Opcode
+      
+    Case #ICallInsn
+      Insn = "icall|" + Str( *Instruction\Operand1 )
+      
+    Case #BlockInsn
+      Insn = ".block|" + Str( *Instruction\Operand1 )
+      
+    Case #ConditionalInsn
+      ;;;;TODO
+      Insn = ".if|" + Str( *Instruction\Operand1 )
+      
+    Case #TypecaseInsn
+      Insn = ".typecase|" + Str( *Instruction\Operand1 ) + "|" + Str( *Instruction\Operand2 )
+      
+  EndSelect
+  
+  ProcedureReturn "i|" + insn
+  
 EndProcedure
 
 Procedure SendProgram()
@@ -3011,6 +3437,29 @@ Procedure SendProgram()
   If Program\FunctionCount > 0
     For Index = 0 To Program\FunctionCount - 1
       Define.Function *Function = @Program\Functions( Index )
+      Define.s Message = ToFunctionMessage( *Function )
+      If File
+        WriteStringN( File, Message, #PB_UTF8 )
+      EndIf
+      If UnityPlayerClient
+        BatchSendString( Message )
+      EndIf
+      
+      ; Send instructions.
+      Define.i InstructionIndex
+      For InstructionIndex = 0 To *Function\InstructionCount - 1
+        Define.Instruction *Instruction = @Program\Instructions( *Function\FirstInstruction + InstructionIndex )
+        Message = ToInstructionMessage( Instruction )
+        If File
+          ; For debugging, write out instruction index explicitly.
+          WriteString( File, Str( InstructionIndex ), #PB_UTF8 )
+          WriteString( File, ": ", #PB_UTF8 )
+          WriteStringN( File, Message, #PB_UTF8 )
+        EndIf
+        If UnityPlayerClient
+          BatchSendString( Message )
+        EndIf
+      Next
     Next
   EndIf
   
@@ -3126,6 +3575,8 @@ Procedure UpdateProgram( WithLibraries.b = #True )
 
 EndProcedure
 
+;{ TESTS
+
 ProcedureUnit CanCompileSimpleProgram()
 
   Define.s Text = ~"type FirstType;\n" +
@@ -3176,8 +3627,48 @@ ProcedureUnit CanCompileSimpleProgram()
   
 EndProcedureUnit
 
+ProcedureUnit CanGenerateDispatchTree()
+
+  Define.s Text = ~"type Object;\n" +
+                  ~"type String : Object;\n" +
+                  ~"type Boolean = True | False;\n" +
+                  ~"object True;\n" +
+                  ~"object False;\n" +
+                  ~"method ToString( Object ) : String return 1; end;\n" +
+                  ~"method ToString( Boolean ) : String return 2; end;\n" +
+                  ~"method ToString( True ) : String return 3; end;\n"
+  
+  *Text = UTF8( Text )
+  TextLength = Len( Text )
+  
+  UpdateProgram( #False )
+  
+  Assert( MapSize( GenProgram\FunctionTable\Functions() ) = 1 )
+  Assert( FindMapElement( GenProgram\FunctionTable\Functions(), "to_string" ) <> #Null )
+  
+  Define.GenFunction *GenFunction = GenProgram\FunctionTable\Functions()
+  
+  Assert( *GenFunction\MethodCount = 3 )
+  Assert( *GenFunction\DispatchTree\NodeCount = 3 )
+  Assert( *GenFunction\DispatchTree\Nodes( 0 )\ArgumentTypeId = GenProgram\TypeTable\ObjectTypeId )
+  Assert( *GenFunction\DispatchTree\Nodes( 0 )\ResultTypeId = GenProgram\TypeTable\NamedTypes( "string" ) )
+  Assert( *GenFunction\DispatchTree\Nodes( 0 )\Method = @GenProgram\FunctionTable\Functions( "to_string" )\Methods( 0 ) )
+  Assert( *GenFunction\DispatchTree\Nodes( 0 )\Parent = -1 )
+  Assert( *GenFunction\DispatchTree\Nodes( 1 )\ArgumentTypeId = GenProgram\TypeTable\NamedTypes( "boolean" ) )
+  Assert( *GenFunction\DispatchTree\Nodes( 1 )\ResultTypeId = GenProgram\TypeTable\NamedTypes( "string" ) )
+  Assert( *GenFunction\DispatchTree\Nodes( 1 )\Parent = 0 )
+  Assert( *GenFunction\DispatchTree\Nodes( 1 )\Method = @GenProgram\FunctionTable\Functions( "to_string" )\Methods( 1 ) )
+  Assert( *GenFunction\DispatchTree\Nodes( 2 )\ArgumentTypeId = GenProgram\TypeTable\NamedTypes( "true" ) )
+  Assert( *GenFunction\DispatchTree\Nodes( 2 )\ResultTypeId = GenProgram\TypeTable\NamedTypes( "string" ) )
+  Assert( *GenFunction\DispatchTree\Nodes( 2 )\Method = @GenProgram\FunctionTable\Functions( "to_string" )\Methods( 2 ) )
+  Assert( *GenFunction\DispatchTree\Nodes( 2 )\Parent = 1 )
+  
+EndProcedureUnit
+  
+;}
+
 ;==============================================================================
-; Documentation.
+;-== Documentation.
 
 ;;;;TODO: put this on a separate thread
 ;;;;TODO: support docs for language elements (just have manual tab with handwritten content?)
@@ -3351,6 +3842,53 @@ Procedure GenerateTableOfContents()
   
 EndProcedure
 
+Procedure CollectDocAnnotations( *StringBuilder.StringBuilder, AnnotationKind.i, *Definition.Definition )
+  
+  Define.b IsFirst = #True
+  
+  Define.i AnnotationIndex = *Definition\FirstAnnotation
+  While AnnotationIndex <> -1
+    
+    Define.Annotation *Annotation = @Code\Annotations( AnnotationIndex )
+    AnnotationIndex = *Annotation\NextAnnotation
+    
+    If *Annotation\AnnotationKind <> AnnotationKind
+      Continue
+    EndIf
+    
+    If IsFirst
+      AppendString( *StringBuilder, "<p>" )
+      IsFirst = #False
+    ElseIf *Annotation\AnnotationText = ""
+      ; Empty line starts new paragraph.
+      AppendString( *StringBuilder, "</p><p>" )
+    EndIf
+    
+    AppendString( *StringBuilder, *Annotation\AnnotationText )
+    AppendString( *StringBuilder, " " )
+    
+  Wend
+  
+  If Not IsFirst
+    AppendString( *StringBuilder, "</p>" )
+  EndIf
+  
+EndProcedure
+
+Procedure AddDocAnnotations( *StringBuilder.StringBuilder, *Definition.Definition )
+  
+  ;;;;TODO: collect inherited docs
+  
+  ; Add description.
+  AppendString( *StringBuilder, "<h3>Description</h3>" )
+  CollectDocAnnotations( *StringBuilder, #DescriptionAnnotation, *Definition )
+  
+  ; Add details.
+  AppendString( *StringBuilder, "<h3>Details</h3>" )
+  CollectDocAnnotations( *StringBuilder, #DetailsAnnotation, *Definition )
+  
+EndProcedure
+
 Procedure GenerateDocsForDefinition( DefinitionKind.i, Name.s, *Builder.StringBuilder )
   
   ;;;;TODO: parse x: markup
@@ -3359,47 +3897,23 @@ Procedure GenerateDocsForDefinition( DefinitionKind.i, Name.s, *Builder.StringBu
   AppendString( *Builder, "<h2>" )
   AppendString( *Builder, DefinitionKindToString( DefinitionKind ) )
   AppendString( *Builder, ": <i>" )
-  AppendString( *Builder, Name )
+  AppendString( *Builder, FormatIdentifier( Name ) )
   AppendString( *Builder, "</i></h2>" )
   
   ;;;;TODO: for types, add supertype information (with link); or better yet; type hierarchy
   ;;;;TODO: for functions, print prototypes (with links)
   
-  Define.i DefinitionIndex
-  For DefinitionIndex = 0 To Code\DefinitionCount - 1
-    
-    ;;;;TODO: proper (fast) lookup using a map
-    Define.Definition *Definition = @Code\Definitions( DefinitionIndex )
-    If *Definition\DefinitionKind <> DefinitionKind
-      Continue
-    EndIf
-    
-    If Code\Identifiers( *Definition\Name ) <> Name
-      Continue
-    EndIf
-    
-    ; Add content from doc annotations.
-    Define.i AnnotationIndex = *Definition\FirstAnnotation
-    While AnnotationIndex <> -1
+  Select DefinitionKind
       
-      Define.Annotation *Annotation = @Code\Annotations( AnnotationIndex )
+    Case #TypeDefinition
+      Define.i TypeId = LookupNamedTypeFromString( Name )
+      If TypeId <> #INVALID_TYPE_ID
+        Define.GenType *GenType = GenTypePtr( TypeId )
+        Define.i DefinitionIndex = *GenType\DefinitionIndex
+        AddDocAnnotations( *Builder, @Code\Definitions( DefinitionIndex ) )
+      EndIf
       
-      ;;;;TODO: allow multiple of each annotation and treat them like line continuations (and empty annotation is new paragraph)
-      
-      Select *Annotation\AnnotationKind
-          
-        Case #DescriptionAnnotation
-          AppendString( *Builder, "<h3>Description</h3><p>" )
-          AppendString( *Builder, *Annotation\AnnotationText )
-          AppendString( *Builder, "</p>" )
-          
-      EndSelect
-      
-      AnnotationIndex = *Annotation\NextAnnotation
-      
-    Wend
-    
-  Next
+  EndSelect
   
 EndProcedure
 
@@ -3453,9 +3967,11 @@ Procedure RefreshDocs()
   
   ; Refresh doc view.
   TOCNeedsToBeRegenerated = #True
-  Define.s URL = GetGadgetText( DocViewer )
-  SetGadgetText( DocViewer, URL )
-  ;SetGadgetState( DocViewer, #PB_Web_Refresh )
+  If DocViewer
+    Define.s URL = GetGadgetText( DocViewer )
+    SetGadgetText( DocViewer, URL )
+    ;SetGadgetState( DocViewer, #PB_Web_Refresh )
+  EndIf
   
 EndProcedure
 
@@ -3492,7 +4008,7 @@ Procedure FlushText( Recompile.b = #True )
 EndProcedure
 
 ;==============================================================================
-; Main loop.
+;-== Main loop.
 
 UpdateProgram()
 Status( "Waiting for Unity editor to connect..." )
@@ -3628,6 +4144,9 @@ EndIf
 ;[X] Methods can have value parameters
 ;[X] Can generate subtype matrix
 ;[X] Can assign types to methods
+;[X] Generate dispatch trees
+;[ ] Can generate a "match argument" sequence for one method
+;[ ] Can translate a simple if statement followed by a return statement
 ;[ ] Can generate and populate functions with methods
 ;[ ] Can invoke methods
 ;[ ] Can have conditional branches
@@ -3691,7 +4210,8 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 2737
-; FirstLine = 2691
-; Folding = ---------------
+; CursorPosition = 4146
+; FirstLine = 3711
+; Folding = --------v--------
+; Markers = 2379,3132,3649
 ; EnableXP
