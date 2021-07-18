@@ -477,6 +477,7 @@ Enumeration LiteralType
   #IntegerLiteralType = -1
   #FloatLiteralType = -2
   #StringLiteralType = -3
+  #NothingLiteralType = -4 ; Empty tuple expression '()'. Not translated to 'Nothing' as that would be affected by name lookup rules.
 EndEnumeration
 
 Enumeration Operator
@@ -699,6 +700,29 @@ ProcedureUnit CanFormatIdentifier()
   Assert( FormatIdentifier( "foo_bar", #JavaCase ) = "fooBar" )
   Assert( FormatIdentifier( "foo_bar", #PascalCase ) = "FooBar" )
 EndProcedureUnit
+  
+Procedure.s ExpressionKindToString( ExpressionKind.i )
+  Select ExpressionKind
+    Case #ApplyExpression
+      ProcedureReturn "Apply"
+    Case #TupleExpression
+      ProcedureReturn "Tuple"
+    Case #LiteralExpression
+      ProcedureReturn "Literal"
+    Case #NameExpression
+      ProcedureReturn "Name"
+    Case #AndExpression
+      ProcedureReturn "And"
+    Case #OrExpression
+      ProcedureReturn "Or"
+    Case #NotExpression
+      ProcedureReturn "Not"
+    Case #ArrowExpression
+      ProcedureReturn "Arrow"
+    Default
+      ProcedureReturn "<Unknown>"
+  EndSelect
+EndProcedure
   
 Procedure.s DefinitionKindToString( DefinitionKind.i )
   Select DefinitionKind
@@ -965,22 +989,6 @@ Procedure SkipWhitespace( *Parser.Parser, AllowNewline.b = #True )
     *Parser\CurrentColumn + 1
     
   Wend
-  
-EndProcedure
-
-Procedure.b NextCharIsListBegin( *Parser.Parser )
-  
-  SkipWhitespace( *Parser )
-  If *Parser\Position < *Parser\EndPosition
-    Define.c Char = PeekB( *Parser\Position ) 
-    If *Parser\CurrentExpressionContext = #ValueContext
-      ProcedureReturn Bool( Char = '(' )
-    Else
-      ProcedureReturn Bool( Char = '<' )
-    EndIf
-  EndIf
-  
-  ProcedureReturn #False
   
 EndProcedure
 
@@ -1259,44 +1267,52 @@ Procedure.i ParseBasicExpression( *Parser.Parser )
     
     *Parser\Position + 1
     
-    Define.i FirstExpression = ParseExpression( *Parser )
-    If FirstExpression = -1
-      ;;;;TODO: diagnose
-      Debug "Expecting expression!"
-    EndIf
-    
     SkipWhitespace( *Parser )
-    If *Parser\Position >= *Parser\EndPosition Or PeekB( *Parser\Position ) <> ','
-      ; It's a simple parenthesized expression. The parenthesis simply
-      ; disappear in our internal representation.
-      ExpectSymbol( *Parser, ")", 1 )
-      ProcedureReturn FirstExpression
-    EndIf
-    
-    Define.i LastExpression = FirstExpression
-    
-    While *Parser\Position < *Parser\EndPosition
+    If MatchToken( *Parser, ")", 1, #True )
+      ; Empty tuple expression '()'. Semantically identical to 'Nothing' object.
+      Operator = #LiteralExpression
+      Type = #NothingLiteralType
+    Else
       
-      SkipWhitespace( *Parser )
-      If MatchToken( *Parser, ")", 1, #True )
-        Break
-      ElseIf Not MatchToken( *Parser, ",", 1, #True )
+      Define.i FirstExpression = ParseExpression( *Parser )
+      If FirstExpression = -1
         ;;;;TODO: diagnose
-        Debug "Expecting ','!!"
+        Debug "Expecting expression!"
       EndIf
       
-      Define.i Expression = ParseExpression( *Parser )
-      If Expression = -1
-        Break
+      If *Parser\Position >= *Parser\EndPosition Or PeekB( *Parser\Position ) <> ','
+        ; It's a simple parenthesized expression. The parenthesis simply
+        ; disappear in our internal representation.
+        ExpectSymbol( *Parser, ")", 1 )
+        ProcedureReturn FirstExpression
       EndIf
       
-      Code\Expressions( LastExpression )\NextExpression = Expression
-      LastExpression = Expression
+      Define.i LastExpression = FirstExpression
       
-    Wend
-    
-    Operator = #TupleExpression
-    FirstOperandI = FirstExpression
+      While *Parser\Position < *Parser\EndPosition
+        
+        SkipWhitespace( *Parser )
+        If MatchToken( *Parser, ")", 1, #True )
+          Break
+        ElseIf Not MatchToken( *Parser, ",", 1, #True )
+          ;;;;TODO: diagnose
+          Debug "Expecting ','!!"
+        EndIf
+        
+        Define.i Expression = ParseExpression( *Parser )
+        If Expression = -1
+          Break
+        EndIf
+        
+        Code\Expressions( LastExpression )\NextExpression = Expression
+        LastExpression = Expression
+        
+      Wend
+      
+      Operator = #TupleExpression
+      FirstOperandI = FirstExpression
+      
+    EndIf
   
   Else
     ProcedureReturn -1
@@ -1329,17 +1345,36 @@ Procedure.i ParseUnaryPostfixExpression( *Parser.Parser )
       FirstExpression = DotExpr
     EndIf
     
+    SkipWhitespace( *Parser )
+    
   EndIf
   
   ;;;;REVIEW: should this be considered a binary expression instead?
   ; ATM we allow only parenthesized and tuple expressions to form apply expressions.
   ; With a more powerful parser, that could be changed but there's a lot of ambiguity
   ; that needs to be figured out on that path.
-  If NextCharIsListBegin( *Parser )
-      
-    Define.i SecondExpression = ParseBasicExpression( *Parser )
+  If *Parser\Position < *Parser\EndPosition
+    
+    Define.i SecondExpression = -1
+    
+    Define.c Char = PeekB( *Parser\Position ) 
+    If *Parser\CurrentExpressionContext = #ValueContext
+      If Char = '('
+        SecondExpression = ParseBasicExpression( *Parser )
+      ElseIf Char = '<'
+        ; Angle bracket in value context switches us into type context.
+        PushExpressionContext( *Parser, #TypeContext )
+        SecondExpression = ParseBasicExpression( *Parser )
+        PopExpressionContext( *Parser )
+      EndIf
+    Else
+      ; In type context, '<' is nesting and '(' is grouping.
+      If Char = '<' Or Char = '('
+        SecondExpression = ParseBasicExpression( *Parser )
+      EndIf
+    EndIf
+    
     If SecondExpression <> -1
-      
       ; If the left side is a dot expression, create a tuple expression. "A.B( C )" -> "B( A, C )"
       If IsDotExpression
         MakeExpressionOp2I( TupleExpression, #TupleExpression, #INVALID_TYPE_ID, Code\Expressions( FirstExpression )\SecondOperandI, SecondExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
@@ -1349,9 +1384,7 @@ Procedure.i ParseUnaryPostfixExpression( *Parser.Parser )
         MakeExpressionOp2I( ApplyExpr, #ApplyExpression, #INVALID_TYPE_ID, FirstExpression, SecondExpression, Code\Expressions( FirstExpression )\Region\LeftPos )
         ProcedureReturn ApplyExpr
       EndIf
-      
     EndIf
-    
   EndIf
   
   ProcedureReturn FirstExpression
@@ -1474,7 +1507,16 @@ Procedure.i ParseStatement( *Parser.Parser )
     Statement = #ReturnStatement
     
   Else
-    ProcedureReturn -1
+    
+    ReferencedIndex = ParseExpression( *Parser )
+    If ReferencedIndex <> -1
+      
+      Statement = #ExpressionStatement
+      ExpectSymbol( *Parser, ";", 1 )
+      
+    Else
+      ProcedureReturn -1
+    EndIf
   EndIf
   
   MakeStatement( StatementIndex, Statement, ReferencedIndex, InnerScope )
@@ -1926,7 +1968,7 @@ ProcedureUnit CanParseDotExpressionWithArguments()
   Assert( Code\Identifiers( 2 ) = "c" )
   Assert( Code\Expressions( 0 )\Operator = #NameExpression )
   Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
-  Assert( Code\Expressions( 0 )\NextExpression = -1 ) ; These are not linked.
+  Assert( Code\Expressions( 0 )\NextExpression = -1 )
   Assert( Code\Expressions( 1 )\Operator = #NameExpression )
   Assert( Code\Expressions( 1 )\FirstOperandI = 1 )
   Assert( Code\Expressions( 1 )\NextExpression = -1 )
@@ -1947,6 +1989,91 @@ ProcedureUnit CanParseDotExpressionWithArguments()
   Assert( Code\Expressions( 4 )\NextExpression = -1 )
 EndProcedureUnit
 
+ProcedureUnit CanParseApplyNothingExpression()
+  ResetCode()
+  TestParseText( @ParseExpression(), "a()", 2 )
+  Assert( Code\ExpressionCount = 3 )
+  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\Context = #ValueContext )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = -1 )
+  Assert( Code\Expressions( 1 )\Operator = #LiteralExpression )
+  Assert( Code\Expressions( 1 )\Context = #ValueContext )
+  Assert( Code\Expressions( 1 )\Type = #NothingLiteralType )
+  Assert( Code\Expressions( 1 )\NextExpression = -1 )
+  Assert( Code\Expressions( 2 )\Operator = #ApplyExpression )
+  Assert( Code\Expressions( 2 )\Context = #ValueContext )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 2 )\SecondOperandI = 1 )
+  Assert( Code\Expressions( 2 )\NextExpression = -1 )
+EndProcedureUnit
+
+CompilerIf #False
+ProcedureUnit CanParseComplexApplyExpression()
+  ResetCode()
+  TestParseText( @ParseExpression(), "a.b< c, d >( 1, ( 2, 3 ), 4 )", 2 )
+  Assert( Code\ExpressionCount = 5 )
+  Assert( Code\IdentifierCount = 4 )
+  Assert( Code\Identifiers( 0 ) = "a" )
+  Assert( Code\Identifiers( 1 ) = "b" )
+  Assert( Code\Identifiers( 2 ) = "c" )
+  Assert( Code\Identifiers( 3 ) = "d" )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression ) ; a
+  Assert( Code\Expressions( 0 )\Context = #ValueContext )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 0 )\NextExpression = -1 )
+  Assert( Code\Expressions( 1 )\Operator = #NameExpression ) ; b
+  Assert( Code\Expressions( 1 )\Context = #ValueContext )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 1 )\NextExpression = -1 )
+  Assert( Code\Expressions( 2 )\Operator = #ApplyExpression ) ; b< ... >( a, 1, ... )
+  Assert( Code\Expressions( 2 )\Context = #ValueContext )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 3 )
+  Assert( Code\Expressions( 2 )\SecondOperandI = 123456 )
+  Assert( Code\Expressions( 2 )\NextExpression = -1 )
+  Assert( Code\Expressions( 3 )\Operator = #ApplyExpression ) ; b< c, d >
+  Assert( Code\Expressions( 3 )\Context = #TypeContext )
+  Assert( Code\Expressions( 3 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 3 )\SecondOperandI = 6 )
+  Assert( Code\Expressions( 3 )\NextExpression = -1 )
+  Assert( Code\Expressions( 4 )\Operator = #NameExpression ) ; c
+  Assert( Code\Expressions( 4 )\Context = #TypeContext )
+  Assert( Code\Expressions( 4 )\FirstOperandI = 2 )
+  Assert( Code\Expressions( 4 )\NextExpression = -1 )
+  Assert( Code\Expressions( 5 )\Operator = #NameExpression ) ; d
+  Assert( Code\Expressions( 5 )\Context = #TypeContext )
+  Assert( Code\Expressions( 5 )\FirstOperandI = 3 )
+  Assert( Code\Expressions( 5 )\NextExpression = -1 )
+  Assert( Code\Expressions( 6 )\Operator = #TupleExpression )
+  Assert( Code\Expressions( 6 )\FirstOperandI = 3 )
+  Assert( Code\Expressions( 6 )\SecondOperandI = 4 )
+  Assert( Code\Expressions( 6 )\NextExpression = -1 )
+  Assert( Code\Expressions( 7 )\Operator = #LiteralExpression ) ; 1
+  Assert( Code\Expressions( 7 )\Type = #IntegerLiteralType )
+  Assert( Code\Expressions( 7 )\Context = #ValueContext )
+  Assert( Code\Expressions( 7 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 7 )\NextExpression = -1 )
+  Assert( Code\Expressions( 8 )\Operator = #LiteralExpression ) ; 2
+  Assert( Code\Expressions( 8 )\Type = #IntegerLiteralType )
+  Assert( Code\Expressions( 8 )\Context = #ValueContext )
+  Assert( Code\Expressions( 8 )\FirstOperandI = 2 )
+  Assert( Code\Expressions( 8 )\NextExpression = -1 )
+  Assert( Code\Expressions( 9 )\Operator = #LiteralExpression ) ; 3
+  Assert( Code\Expressions( 9 )\Type = #IntegerLiteralType )
+  Assert( Code\Expressions( 9 )\Context = #ValueContext )
+  Assert( Code\Expressions( 9 )\FirstOperandI = 3 )
+  Assert( Code\Expressions( 9 )\NextExpression = -1 )
+  Assert( Code\Expressions( 10 )\Operator = #LiteralExpression ) ; 4
+  Assert( Code\Expressions( 10 )\Type = #IntegerLiteralType )
+  Assert( Code\Expressions( 10 )\Context = #ValueContext )
+  Assert( Code\Expressions( 10 )\FirstOperandI = 4 )
+  Assert( Code\Expressions( 10 )\NextExpression = -1 )
+
+EndProcedureUnit
+CompilerEndIf  
+  
 ProcedureUnit CanParseIfStatementWithoutElse()
   ResetCode()
   TestParseText( @ParseStatement(), "if ( a ) return 123; end;", 1 )
@@ -2105,12 +2232,14 @@ EndProcedureUnit
 
 ProcedureUnit CanParseSimpleMethodDefinition()
   ResetCode()
-  TestParseText( @ParseDefinition(), "method First() return; end;", 0 )
+  TestParseText( @ParseDefinition(), "method First() Foo(); end;", 0 )
   Assert( Code\DefinitionCount = 1 )
-  Assert( Code\IdentifierCount = 1 )
+  Assert( Code\IdentifierCount = 2 )
   Assert( Code\ScopeCount = 2 )
   Assert( Code\StatementCount = 1 )
+  Assert( Code\ExpressionCount = 3 )
   Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Identifiers( 1 ) = "foo" )
   Assert( Code\Definitions( 0 )\Name = 0 )
   Assert( Code\Definitions( 0 )\DefinitionKind = #MethodDefinition )
   Assert( Code\Definitions( 0 )\Flags = 0 )
@@ -2120,8 +2249,19 @@ ProcedureUnit CanParseSimpleMethodDefinition()
   Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
   Assert( Code\Scopes( 1 )\Definition = 0 )
   Assert( Code\Scopes( 1 )\FirstDefinitionOrStatement = 0 )
-  Assert( Code\Statements( 0 )\StatementKind = #ReturnStatement )
+  Assert( Code\Statements( 0 )\StatementKind = #ExpressionStatement )
+  Assert( Code\Statements( 0 )\ReferencedIndex = 2 )
   Assert( Code\Statements( 0 )\NextStatement = -1 )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\Context = #ValueContext )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 1 )\Operator = #LiteralExpression )
+  Assert( Code\Expressions( 1 )\Context = #ValueContext )
+  Assert( Code\Expressions( 1 )\Type = #NothingLiteralType )
+  Assert( Code\Expressions( 2 )\Operator = #ApplyExpression )
+  Assert( Code\Expressions( 2 )\Context = #ValueContext )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 2 )\SecondOperandI = 1 )
 EndProcedureUnit
 
 ProcedureUnit CanParseMethodDefinitionWithValueParameters()
@@ -2759,6 +2899,9 @@ Procedure.i AssignTypeId( ExpressionIndex.i )
         Case #StringLiteralType
           TypeId = GenProgram\TypeTable\ImmutableStringTypeId
           
+        Case #NothingLiteralType
+          TypeId = GenProgram\TypeTable\NothingTypeId
+          
         Default
           Debug "Unknown literal type!"
           
@@ -3380,12 +3523,49 @@ Procedure GenFunctions()
   
   ;{ Resolve all call sites.
   
+  ReDim GenProgram\FunctionTable\CallSites( Code\ExpressionCount )
+  FillMemory( @GenProgram\FunctionTable\CallSites( 0 ), ArraySize( GenProgram\FunctionTable\CallSites() ) * SizeOf( GenCallSite ), 0, #PB_Long )
+  
   Define.i ExpressionIndex
   For ExpressionIndex = 0 To Code\ExpressionCount - 1
     
-    Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
-    If *Expression\Type <> #ApplyExpression
+    ; Check if it's already resolved.
+    Define.GenCallSite *CallSite = @GenProgram\FunctionTable\CallSites( ExpressionIndex )
+    If *CallSite\Function <> #Null
+      Continue
     EndIf
+    
+    Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
+    If *Expression\Operator <> #ApplyExpression Or *Expression\Context <> #ValueContext
+      Continue
+    EndIf
+    
+    ; Look up function.
+    Define.Expression *LeftHandExpr = @Code\Expressions( *Expression\FirstOperandI )
+    Select *LeftHandExpr\Operator
+        
+      Case #NameExpression
+        
+        Define.s Name = Code\Identifiers( *LeftHandExpr\FirstOperandI )
+        Define.GenFunction *CalledFunction = FindMapElement( GenProgram\FunctionTable\Functions(), Name )
+        If *CalledFunction = #Null
+          ;;;;TODO: diagnose
+          Debug "Can't find function " + Name
+          Continue
+        Else
+          *CallSite\Function = *CalledFunction
+        EndIf
+        
+      Case #ApplyExpression
+        ;;;;TODO
+        Debug "TODO...."
+        
+      Default
+        Debug "Not implemented... ApplyExpression on expression of type " + ExpressionKindToString( *LeftHandExpr\Operator )
+        
+    EndSelect
+    
+    ; Find dispatch node in dispatch tree.
     
   Next
   
@@ -3763,7 +3943,24 @@ ProcedureUnit CanGenerateDispatchTree()
   Assert( *GenFunction\DispatchTree\Nodes( 2 )\Parent = 1 )
   
 EndProcedureUnit
+
+CompilerIf #False
+ProcedureUnit CanDetectCallToMissingFunction()
+
+  Define.s Text = ~"type Object;\n" +
+                  ~"object Nothing;\n" +
+                  ~"method Test() Flub(); end;\n";
   
+  *Text = UTF8( Text )
+  TextLength = Len( Text )
+  
+  UpdateProgram( #False )
+  
+  ;
+  
+EndProcedureUnit
+CompilerEndIf
+
 ;}
 
 ;==============================================================================
@@ -4274,6 +4471,7 @@ EndIf
 
 ; ...
 
+;[ ] Make most semicolons optional
 ;[ ] Split up source code for IDE into modules
 ;[ ] Dark theme for text editor
 ;[ ] Diagnostics are shown as annotations on code
@@ -4313,8 +4511,8 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 4248
-; FirstLine = 3796
-; Folding = --------v---------
-; Markers = 1322,2457,3384,3748
+; CursorPosition = 2074
+; FirstLine = 2045
+; Folding = ------------------
+; Markers = 1338,2597,3544,3928
 ; EnableXP

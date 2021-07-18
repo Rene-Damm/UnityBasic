@@ -22,6 +22,7 @@ TYPE Next;
 TYPE Fourth;
 
 METHOD MyMethod() : INTEGER
+    Flub();
     IF True
         Return 2344;
     END;
