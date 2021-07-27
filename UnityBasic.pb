@@ -456,8 +456,8 @@ Structure Annotation
 EndStructure
 
 Enumeration ClauseKind
-  #PreconditionClause
-  #PostconditionClause
+  #PreconditionClause   ; 'requires'
+  #PostconditionClause  ; 'ensures'
   #InvariantClause
   #WhereClause
 EndEnumeration
@@ -768,8 +768,10 @@ Structure Parser
   *StartPosition
   LastRegion.TextRegion
   FileName.s
+  NameBufferSize.l
   NameBuffer.s
-  NameBufferSize.i
+  StringBufferSize.l
+  StringBuffer.s
   CurrentLine.i
   CurrentColumn.i
   CurrentScope.i
@@ -1069,8 +1071,8 @@ Procedure.i ReadName( *Parser.Parser )
   EndIf
   
   Define.i Length = *Parser\Position - *StartPosition
-  If *Parser\NameBufferSize < Length * 2
-    *Parser\NameBufferSize = Length * 2
+  If *Parser\NameBufferSize < ( Length + 1 ) * 2
+    *Parser\NameBufferSize = ( Length + 1 ) * 2
     *Parser\NameBuffer = Space( *Parser\NameBufferSize )
   EndIf
   
@@ -1249,11 +1251,56 @@ Procedure.i ParseBasicExpression( *Parser.Parser )
     Type = #IntegerLiteralType
     FirstOperandI = IntegerPart
     
-  CompilerIf #False
   ElseIf Char = '"'
-    
+        
     ; Strings.
-  CompilerEndIf
+    Define.l StringLength = 0
+    
+    Macro PushChar( Char )
+      If StringLength = *Parser\StringBufferSize
+        *Parser\StringBufferSize + 1024
+        Define.s NewBuffer = Space( *Parser\StringBufferSize )
+        If *Parser\StringBuffer
+          CopyMemory( @*Parser\StringBuffer, @NewBuffer, StringLength * SizeOf( Character ) )
+        EndIf
+        *Parser\StringBuffer = NewBuffer
+      EndIf
+      PokeC( @*Parser\StringBuffer + StringLength * SizeOf( Character ), Char )
+      StringLength + 1
+    EndMacro
+    
+    *Parser\Position + 1
+    While *Parser\Position < *Parser\EndPosition
+      Char = PeekB( *Parser\Position )
+      If Char = '"'
+        Break
+      EndIf
+      ;;;;TODO: escape sequences (including unicode chars)
+      PushChar( Char )
+      *Parser\Position + 1
+    Wend
+    
+    If *Parser\Position = *Parser\EndPosition Or PeekB( *Parser\Position ) <> '"'
+      ;;;;TODO: diagnose
+      Debug "Missing doublequote in string literal"
+    Else
+      *Parser\Position + 1
+    EndIf
+    
+    PushChar( #NUL )
+    
+    If Not FindMapElement( Code\StringLiterals(), *Parser\StringBuffer )
+      FirstOperandI = MapSize( Code\StringLiterals() )
+      AddMapElement( Code\StringLiterals(), *Parser\StringBuffer )
+      Code\StringLiterals() = FirstOperandI
+    Else
+      FirstOperandI = Code\StringLiterals()
+    EndIf
+    
+    Type = #StringLiteralType
+    Operator = #LiteralExpression
+    
+    UndefineMacro PushChar
     
   ElseIf IsAlpha( Char ) Or Char = '_'
     
@@ -1857,7 +1904,6 @@ ProcedureUnit CanParseIntegerLiteral()
   Assert( Code\Expressions( 0 )\FirstOperandI = 1234 )
 EndProcedureUnit
 
-CompilerIf #False
 ProcedureUnit CanParseStringLiteral()
   ResetCode()
   TestParseText( @ParseExpression(), ~"  \"abc\" ", 0 )
@@ -1865,9 +1911,11 @@ ProcedureUnit CanParseStringLiteral()
   Assert( Code\Expressions( 0 )\Operator = #LiteralExpression )
   Assert( Code\Expressions( 0 )\Context = #ValueContext )
   Assert( Code\Expressions( 0 )\Type = #StringLiteralType )
-  Assert( Code\Expressions( 0 )\FirstOperandI = 1234 )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 0 )
+  Assert( MapSize( Code\StringLiterals() ) = 1 )
+  Assert( FindMapElement( Code\StringLiterals(), "abc" ) <> #Null )
+  Assert( Code\StringLiterals() = 0 )
 EndProcedureUnit
-CompilerEndIf  
 
 ProcedureUnit CanParseNameExpression()
   ResetCode()
@@ -2378,27 +2426,28 @@ EndStructure
 Enumeration InstructionCode
   
   ; Invocation insns.
-  #CallInsn = 1 ; Call function.
-  #ICallInsn    ; Call intrinsic.
+  #CallInsn = 1 ; Call function. Operand1 is function index. Operand2 is argument. Value is result value.
+  #CCallInsn    ; Call function with closure. Operand1 is function index. Operand2 is argument. Operand3 is type index of closure.
+  #ICallInsn    ; Call intrinsic. Operand1 is Intrinsic enum value. Operand2 is argument. Value is result value.
   #YieldInsn
   #ReturnInsn
   
   ; Memory insns.
   ; Store is the only way of changing state.
-  #LoadInsn
-  #StoreInsn ; No value.
+  #LoadInsn     ; Load field/value. Operand1 is object. Operand2 is field index.
+  #StoreInsn    ; Store field. Operand1 is object. Operand2 is field index. Operand3 is value.
+  #ConsInsn     ; LISP-ish cons for "quasi"-tuples. Operand1 is head. Operand2 is tail.
   
   ; Block insns.
-  #BlockInsn ; With count of instructions comprising the block.
-  #ExitInsn ; With count of blocks to exit.
+  #BlockInsn    ; Operand1 is count of instructions comprising the block.
+  #ExitInsn     ; Operand1 is count of blocks to exit.
   
   ; Guard insns.
-  ; These can only appear right after a BeginBlockInsn.
+  ; These can only appear right after a BlockInsn.
   ; A sequence of these will stack. For any one block, must all be the same type of guards, though.
   #ConditionalInsn ; Compares first arg to True or False singleton. Second arg is flags.
   #CatchInsn
-  #TypecaseInsn ; No subtyping. Checks for exact type ID match on given object. First arg is value, second arg is type ID.
-  #LoopInsn ; Sets up iterator in current block. ;;;;REVIEW: should this be a kind of call insn?
+  #TypecaseInsn ; No subtyping. Checks for exact type ID match on given object. Operand1 is value, Operand2 is type ID.
   
 EndEnumeration
 
@@ -2494,6 +2543,8 @@ Global Program.Program
 
 Global.b WriteGeneratedProgramToDisk = #False
 
+#INVALID_NODE_INDEX = -1
+
 ; These are de-duplicated. One instance of the same field is applied to every
 ; single type it applies to.
 Structure GenField
@@ -2520,24 +2571,42 @@ EndEnumeration
 
 EnumerationBinary GenTypeFlags
   #IsSingletonType
+  #IsAbstractType
+  #IsImmutableType
+  #IsMutableType
 EndEnumeration
 
 ; Every type used in the program gets its own type instance.
 Structure GenType
-  Id.i ; Unique consecutive identifier.
+  Id.l                  ; Unique consecutive identifier.
   TypeKind.b
   TypeFlags.b
-  DefinitionIndex.i ; If coming from definition (named types). Also gives the name.
+  DefinitionIndex.l     ; If coming from definition (named types). Also gives the name.
   FieldCount.i
   Array Fields.GenField( 0 )
   ; If it's a type combinator, this is the IDs of the type being combined.
   ; For instanced types, the first is the generic type being instanced and the second is the tuple type applied to it.
-  LeftOperandTypeId.i
-  RightOperandTypeId.i
+  LeftOperandTypeId.l
+  RightOperandTypeId.l
   ; IDs of types that are combined with this one.
   ; First 0 entry in array is end. If all entries taken, no 0 entry.
   ; All binary combinations are formed from type with *lower* ID (the operator is transitive).
-  Array Combinations.i( 0 )
+  Array Combinations.l( 0 )
+EndStructure
+
+Structure GenTypeTable
+  TypeCount.l
+  ObjectTypeId.l
+  IntegerTypeId.l
+  FloatTypeId.l
+  ImmutableStringTypeId.l
+  NothingTypeId.l
+  TrueTypeId.l
+  FalseTypeId.l
+  *SubtypeMatrix ; 2-dimensional typecount*typecount 2-bitfield matrix with subtype flags (0=not initialized, 1=is not subtype, 2=is subtype).
+  Array Types.GenType( 0 )
+  Map NamedTypes.l() ; Maps a name to a type ID. These are the "primitive" types all other types are built from. Also contains aliases.
+  Map AliasToTypeExpression.i() ; Maps a name to an expression index.
 EndStructure
 
 EnumerationBinary GenMethodFlags
@@ -2560,8 +2629,6 @@ Structure GenMethod
   ArgumentTypeId.i
   ResultTypeId.i
 EndStructure
-
-#INVALID_NODE_INDEX = -1
 
 ; Each node in the dispatch tree has an associated function type.
 ; Each such function type dictates the argument and result types for the entire branch of the tree.
@@ -2590,33 +2657,17 @@ EndStructure
 ; Essentially, each function is an 'Object -> Object' mapping.
 Structure GenFunction
   Name.s
-  MethodCount.i
+  InvocationCount.i
+  BodyScopeIndex.i
   DispatchTree.GenDispatchTree
+  MethodCount.i
   Array Methods.GenMethod( 0 )
-EndStructure
-
-Structure GenObject
-  Name.s
-EndStructure
-
-Structure GenTypeTable
-  TypeCount.i
-  ObjectTypeId.i
-  IntegerTypeId.i
-  FloatTypeId.i
-  ImmutableStringTypeId.i
-  NothingTypeId.i
-  TrueTypeId.i
-  FalseTypeId.i
-  *SubtypeMatrix ; 2-dimensional typecount*typecount 2-bitfield matrix with subtype flags (0=not initialized, 1=is not subtype, 2=is subtype).
-  Array Types.GenType( 0 )
-  Map NamedTypes.i() ; Maps a name to a type ID. These are the "primitive" types all other types are built from. Also contains aliases.
-  Map AliasToTypeExpression.i() ; Maps a name to an expression index.
 EndStructure
 
 Structure GenCallSite
   *Function.GenFunction
   DispatchNodeIndex.l
+  InstructionIndex.l
 EndStructure
 
 Structure GenFunctionTable
@@ -2624,10 +2675,51 @@ Structure GenFunctionTable
   Map Functions.GenFunction()
 EndStructure
 
+;;;;REVIEW: Should this use a trie-approach that also works for auto-completion?
+
+; A symbol table entry.
+; Each entry is a node in a balanced binary tree.
+; Nodes within the same scope can be mutated.
+; Nodes "inherited" from parent scopes cannot be mutated and thus need to be duplicated.
+Structure GenScopeEntry
+  IdentifierIndex.l
+  ScopeIndex.l
+  ValueIndex.l        ; Index into GenValueTable\Values(). -1 if no value entry.
+  TypeIndex.l         ; Index into GenTypeTable\Types(). -1 if no type entry.
+  LeftChildIndex.l
+  RightChildIndex.l
+EndStructure
+
+; 
+Structure GenScope
+  DefinitionOrStatementIndex.l  ; Positive if statement, negative if definition.
+  ParentScope.l                 ; -1 for root.
+  FirstChildScope.l
+  NextSiblingScope.l
+  RootEntry.l
+EndStructure
+
+Structure GenSymbolTable
+  ScopeCount.i
+  Array Scopes.GenScope( 0 ) ; First scope is global scope.
+  Array Entries.GenScopeEntry( 0 )
+EndStructure
+
+Structure GenValue
+  TypeId.l
+EndStructure
+
+Structure GenValueTable
+  ValueCount.l
+  Array Values.GenValue( 0 )
+EndStructure
+
 Structure GenProgram
   Name.s
   Company.s
   Product.s
+  SymbolTable.GenSymbolTable
+  ValueTable.GenValueTable
   TypeTable.GenTypeTable
   FunctionTable.GenFunctionTable
 EndStructure
@@ -2635,6 +2727,37 @@ EndStructure
 ; This is the intermediate representation of the program.
 ; For semantic analysis.
 Global.GenProgram GenProgram
+
+Structure GenBlock
+EndStructure
+
+Structure GenEmitter
+  BlockStackDepth.i
+  Array BlockStack.GenBlock( 0 )
+  InstructionCount.l
+  Array Instructions.Instruction( 0 )
+EndStructure
+
+Procedure.i EmitInsn( *Emitter.GenEmitter, Opcode.b )
+  
+  Define.i InstructionIndex = *Emitter\InstructionCount
+  If ArraySize( *Emitter\Instructions() ) = InstructionIndex
+    ReDim *Emitter\Instructions( InstructionIndex + 4096 )
+  EndIf
+  *Emitter\InstructionCount + 1
+  
+  Define.Instruction *Insn = @*Emitter\Instructions( InstructionIndex )
+  *Insn\Opcode = Opcode
+  
+  ProcedureReturn InstructionIndex
+  
+EndProcedure
+
+Procedure.i EmitBeginBlock( *Emitter.GenEmitter )
+EndProcedure
+
+Procedure EmitEndBlock( *Emitter.GenEmitter )
+EndProcedure
 
 Macro GenTypePtr( TypeId )
   @GenProgram\TypeTable\Types( TypeId - 1 )
@@ -2765,8 +2888,39 @@ Procedure.b ComputeIsFirstSubtypeOfSecond( FirstTypeId.i, SecondTypeId.i )
   
 EndProcedure
 
+Procedure.i NewGenScope( ParentScopeIndex.i )
+  
+  Define ScopeIndex = GenProgram\SymbolTable\ScopeCount
+  If ArraySize( GenProgram\SymbolTable\Scopes() ) = ScopeIndex
+    ReDim GenProgram\SymbolTable\Scopes( ScopeIndex + 512 )
+  EndIf
+  GenProgram\SymbolTable\ScopeCount + 1
+  
+  Define.GenScope *GenScope = @GenProgram\SymbolTable\Scopes( ScopeIndex )
+  *GenScope\ParentScope = ParentScopeIndex
+  
+  ProcedureReturn ScopeIndex
+  
+EndProcedure
+
+; Adds a new GenValue to GenProgram\ValueTable\Values() and returns the *index* for it.
+Procedure.i NewGenValue( TypeId.i )
+  
+  Define ValueIndex = GenProgram\ValueTable\ValueCount
+  If ArraySize( GenProgram\ValueTable\Values() ) = ValueIndex
+    ReDim GenProgram\ValueTable\Values( ValueIndex + 1024 )
+  EndIf
+  GenProgram\ValueTable\ValueCount + 1
+  
+  Define.GenValue *GenValue = @GenProgram\ValueTable\Values( ValueIndex )
+  *GenValue\TypeId = TypeId
+  
+  ProcedureReturn ValueIndex
+  
+EndProcedure
+
 ; Adds a new GenType to GenProgram\TypeTable\Types() and returns a *pointer* to it.
-Procedure.i NewGenType( TypeKind.i )
+Procedure.i NewGenTypePtr( TypeKind.i )
   
   Define.i TypeIndex = GenProgram\TypeTable\TypeCount
   If ArraySize( GenProgram\TypeTable\Types() ) = TypeIndex
@@ -2818,12 +2972,12 @@ Procedure.i MakeCombinedGenType( CombinedTypeKind.i, LeftTypeId.i, RightTypeId.i
   Next
   
   ; We didn't find an existing combination, so add a new one.
-  Define.GenType *GenType = NewGenType( CombinedTypeKind )
+  Define.GenType *GenType = NewGenTypePtr( CombinedTypeKind )
   *GenType\LeftOperandTypeId = LeftTypeId
   *GenType\RightOperandTypeId = RightTypeId
   
   ; If needed, make space in array.
-  *LeftType = @GenProgram\TypeTable\Types( LeftTypeIndex ) ; NewGenType() may have reallocated the array.
+  *LeftType = @GenProgram\TypeTable\Types( LeftTypeIndex ) ; NewGenTypePtr() may have reallocated the array.
   If CombinationIndex = ArraySize( *LeftType\Combinations() )
     ReDim *LeftType\Combinations( CombinationIndex + 8 )
   EndIf
@@ -2833,9 +2987,10 @@ Procedure.i MakeCombinedGenType( CombinedTypeKind.i, LeftTypeId.i, RightTypeId.i
           
 EndProcedure
 
-; Assiging types is recursive.
-Declare.i AssignTypeId( ExpressionIndex.i )
+; Assinging types is recursive.
+Declare.i AssignTypeIdIfTypeExpression( ExpressionIndex.i )
 
+;....... problem... this already depends on symbol table structures
 Procedure.i LookupNamedTypeFromString( Name.s )
   
   Define.i TypeId = #INVALID_TYPE_ID
@@ -2853,7 +3008,7 @@ Procedure.i LookupNamedTypeFromString( Name.s )
         Debug "Cannot find aliased type expression for " + Name
       Else
         Define.i AliasedTypeExpression = GenProgram\TypeTable\AliasToTypeExpression()
-        TypeId = AssignTypeId( AliasedTypeExpression )
+        TypeId = AssignTypeIdIfTypeExpression( AliasedTypeExpression )
         GenProgram\TypeTable\NamedTypes( Name ) = TypeId
       EndIf
       
@@ -2872,90 +3027,155 @@ Procedure.i LookupNamedType( NameIndex.i )
 EndProcedure
 
 ;;;;TODO: catch cycles!
-; Determine the type of the given expression.
-; Works for both value and type expressions.
+; Determine the type of the given type expression.
 ; May lead to other type expressions being assign types as a side effect.
 ; Will generate new types as needed (for every new unique type combination found).
 ; Returns the type ID assigned to the expression.
-Procedure.i AssignTypeId( ExpressionIndex.i )
+Procedure.i AssignTypeIdIfTypeExpression( ExpressionIndex.i )
   
   Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
+  If *Expression\Context <> #TypeContext
+    ProcedureReturn #INVALID_TYPE_ID
+  EndIf
   
   ; Early out if expression has already been assigned a type.
   Define.i TypeId = *Expression\Type
   If TypeId <> 0
+    ProcedureReturn TypeId
+  EndIf
     
-    ; If it's a literal type, replace it with the type ID for the respective
-    ; named type that we found in the program.
-    If Type < 0
-      Select Type
-          
-        Case #IntegerLiteralType
-          TypeId = GenProgram\TypeTable\IntegerTypeId
-          
-        Case #FloatLiteralType
-          TypeId = GenProgram\TypeTable\FloatTypeId
-          
-        Case #StringLiteralType
-          TypeId = GenProgram\TypeTable\ImmutableStringTypeId
-          
-        Case #NothingLiteralType
-          TypeId = GenProgram\TypeTable\NothingTypeId
-          
-        Default
-          Debug "Unknown literal type!"
-          
-      EndSelect
+  Select *Expression\Operator
       
-      *Expression\Type = TypeId
-    EndIf
-    
-  Else
-  
-    If *Expression\Context = #ValueContext
+    Case #NameExpression
+      TypeId = LookupNamedType( *Expression\FirstOperandI )
       
-      ; Assign type to value expression.
+    Case #AndExpression, #OrExpression, #ApplyExpression, #TupleExpression, #ArrowExpression
       
-    Else
-      
-      ; Assign type to type expression.
-      
+      Define.i CombinedTypeKind = -1
       Select *Expression\Operator
-          
-        Case #NameExpression
-          TypeId = LookupNamedType( *Expression\FirstOperandI )
-          
-        Case #AndExpression, #OrExpression, #ApplyExpression, #TupleExpression, #ArrowExpression
-          
-          Define.i CombinedTypeKind = -1
-          Select *Expression\Operator
-            Case #AndExpression
-              CombinedTypeKind = #UnionType
-            Case #OrExpression
-              CombinedTypeKind = #IntersectionType
-            Case #ApplyExpression
-              CombinedTypeKind = #InstancedType
-            Case #TupleExpression
-              CombinedTypeKind = #TupleType
-            Case #ArrowExpression
-              CombinedTypeKind = #FunctionType
-          EndSelect
-          
-          Define.i LeftTypeId = AssignTypeId( *Expression\FirstOperandI )
-          Define.i RightTypeId = AssignTypeId( *Expression\SecondOperandI )
-          
-          Define.GenType *CombinedType = MakeCombinedGenType( CombinedTypeKind, LeftTypeId, RightTypeId )
-          TypeId = *CombinedType\Id
-          
+        Case #AndExpression
+          CombinedTypeKind = #UnionType
+        Case #OrExpression
+          CombinedTypeKind = #IntersectionType
+        Case #ApplyExpression
+          CombinedTypeKind = #InstancedType
+        Case #TupleExpression
+          CombinedTypeKind = #TupleType
+        Case #ArrowExpression
+          CombinedTypeKind = #FunctionType
       EndSelect
-    
       
-    EndIf
-    
-    *Expression\Type = TypeId
-    
+      Define.i LeftTypeId = AssignTypeIdIfTypeExpression( *Expression\FirstOperandI )
+      Define.i RightTypeId = AssignTypeIdIfTypeExpression( *Expression\SecondOperandI )
+      
+      Define.GenType *CombinedType = MakeCombinedGenType( CombinedTypeKind, LeftTypeId, RightTypeId )
+      TypeId = *CombinedType\Id
+      
+  EndSelect
+  
+  *Expression\Type = TypeId  
+  ProcedureReturn TypeId
+  
+EndProcedure
+
+Declare.i FindDispatchTreeNode( *DispatchTree.GenDispatchTree, ArgumentTypeId.i, StartingNode.i = 0 )
+
+Procedure.i AssignTypeIdIfValueExpression( ExpressionIndex.i )
+  
+  Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
+  If *Expression\Context <> #ValueContext
+    ProcedureReturn #INVALID_TYPE_ID
   EndIf
   
+  ; Early out if expression has already been assigned a type.
+  Define.i TypeId = *Expression\Type
+  If TypeId > #INVALID_TYPE_ID
+    ProcedureReturn TypeId
+  ElseIf TypeId < #INVALID_TYPE_ID
+    ; If it's a literal type, replace it with the type ID for the respective
+    ; named type that we found in the program.
+    Select TypeId
+        
+      Case #IntegerLiteralType
+        TypeId = GenProgram\TypeTable\IntegerTypeId
+        
+      Case #FloatLiteralType
+        TypeId = GenProgram\TypeTable\FloatTypeId
+        
+      Case #StringLiteralType
+        TypeId = GenProgram\TypeTable\ImmutableStringTypeId
+        
+      Case #NothingLiteralType
+        TypeId = GenProgram\TypeTable\NothingTypeId
+        
+      Default
+        Debug "Unknown literal type!"
+        
+    EndSelect
+      
+    *Expression\Type = TypeId
+    ProcedureReturn TypeId
+  EndIf
+  
+  ;.... for name lookups, we need proper scoping, so this actually has to go hierarchically
+  ; (however, in this language, only local variables can mess with the dispatching)
+  
+  Select *Expression\Operator
+      
+    Case #ApplyExpression
+      
+      Define.GenCallSite *CallSite = @GenProgram\FunctionTable\CallSites( ExpressionIndex )
+    
+      ; Look up function.
+      Define.Expression *LeftHandExpr = @Code\Expressions( *Expression\FirstOperandI )
+      Select *LeftHandExpr\Operator
+          
+        Case #NameExpression
+          
+          Define.s Name = Code\Identifiers( *LeftHandExpr\FirstOperandI )
+          Define.GenFunction *CalledFunction = FindMapElement( GenProgram\FunctionTable\Functions(), Name )
+          If *CalledFunction = #Null
+            ;;;;TODO: diagnose
+            Debug "Can't find function " + Name
+            ProcedureReturn #INVALID_TYPE_ID
+          Else
+            *CallSite\Function = *CalledFunction
+          EndIf
+          
+        Case #ApplyExpression
+          ;;;;TODO
+          Debug "TODO...."
+          ;need to take type applications into account here
+          
+        Default
+          Debug "Not implemented... ApplyExpression on expression of type " + ExpressionKindToString( *LeftHandExpr\Operator )
+          
+      EndSelect
+      
+      ; Determine argument type.
+      Define.i ArgumentTypeId = AssignTypeIdIfValueExpression( *Expression\SecondOperandI )
+    
+      ; Find dispatch node in dispatch tree.
+      Define.i DispatchNodeIndex = FindDispatchTreeNode( @*CallSite\Function\DispatchTree, ArgumentTypeId )
+      If DispatchNodeIndex = -1
+        ;;;;TODO: diagnose and handle
+        Debug "Function doesn't apply to this argument"
+        ProcedureReturn #INVALID_TYPE_ID
+      EndIf
+      *CallSite\DispatchNodeIndex = DispatchNodeIndex
+    
+      ;;;TODO: If node corresponds to a specialization already, switch to the specialization.
+      
+      ; Count invocation.
+      *CallSite\Function\InvocationCount + 1
+      *CallSite\Function\DispatchTree\Nodes( DispatchNodeIndex )\CallWeightScore + 1
+      
+      ; Return type becomes type of expression.
+      TypeId = *CallSite\Function\DispatchTree\Nodes( DispatchNodeIndex )\ResultTypeId
+      
+  EndSelect
+  
+  *Expression\Type = TypeId  
   ProcedureReturn TypeId
   
 EndProcedure
@@ -2963,11 +3183,8 @@ EndProcedure
 ;;;;TODO: would be more efficient to fold this into the parsing pass
 Procedure GenCollect()
   
-  ; Local F : ( True | False ) -> String
-  ; Local G : Object -> Object
-  
-  ; invalid: F = G
-  ; invalid: G = F
+  ; Add global scope.
+  NewGenScope( -1 )
   
   ;{ Collect definitions.
   ; As a side-effect, we assign a unique type ID to every named type definition that isn't an alias. This
@@ -2984,6 +3201,8 @@ Procedure GenCollect()
     Select *Definition\DefinitionKind
         
       Case #TypeDefinition
+        
+        ;........ the NamedTypes() thing should probably go in the symbol tables instead of into a separate map
         
         If FindMapElement( GenProgram\TypeTable\NamedTypes(), Name )
           ;;;;TODO: add diagnostic
@@ -3003,12 +3222,8 @@ Procedure GenCollect()
           Continue
         EndIf
         
-        Define.GenType *GenType = NewGenType( #NamedType )
+        Define.GenType *GenType = NewGenTypePtr( #NamedType )
         *GenType\DefinitionIndex = DefinitionIndex
-        
-        If *Definition\Flags & #IsSingleton
-          *GenType\TypeFlags & #IsSingletonType
-        EndIf
         
         AddMapElement( GenProgram\TypeTable\NamedTypes(), Name )
         GenProgram\TypeTable\NamedTypes() = *GenType\Id
@@ -3038,6 +3253,12 @@ Procedure GenCollect()
             GenProgram\TypeTable\FalseTypeId = *GenType\Id
             
         EndSelect
+        
+        ; If it's a singleton, also add a value.
+        If *Definition\Flags & #IsSingleton
+          *GenType\TypeFlags & #IsSingletonType
+          NewGenValue( *GenType\Id )
+        EndIf
         
       Case #MethodDefinition
         
@@ -3233,11 +3454,10 @@ EndProcedure
 ; their subtype relationships.
 Procedure GenTypes()
   
-  ; First, assign a type to every expression in the program (both type
-  ; and value expressions).
+  ; First, assign a type to every type expression in the program.
   Define ExpressionIndex.i
   For ExpressionIndex = 0 To Code\ExpressionCount - 1
-    AssignTypeId( ExpressionIndex )
+    AssignTypeIdIfTypeExpression( ExpressionIndex )
   Next
   
   ; Next, assign a type to every method in the program. This may add
@@ -3348,6 +3568,43 @@ Procedure.i AddDispatchTreeNode( *DispatchTree.GenDispatchTree, Parent.i, Argume
   EndIf
   
   ProcedureReturn Index
+  
+EndProcedure
+
+Procedure.i FindDispatchTreeNode( *DispatchTree.GenDispatchTree, ArgumentTypeId.i, StartingNode.i = 0 )
+  
+  Define.i NodeIndex = StartingNode
+  
+  If Not FirstIsSubtypeOfSecond( ArgumentTypeId, *DispatchTree\Nodes( NodeIndex )\ArgumentTypeId )
+    ; Entire dispatch subtree doesn't apply to given argument type.
+    ProcedureReturn #INVALID_NODE_INDEX
+  EndIf
+  
+  While #True
+    
+    ; See if any of the children are more specialized.
+    Define.i ChildIndex = *DispatchTree\Nodes( NodeIndex )\FirstChild
+    Define.b FoundChild = #False
+    While ChildIndex <> #INVALID_NODE_INDEX
+      
+      If FirstIsSubtypeOfSecond( ArgumentTypeId, *DispatchTree\Nodes( ChildIndex )\ArgumentTypeId )
+        FoundChild = #True
+        Break
+      EndIf
+      
+      ChildIndex = *DispatchTree\Nodes( ChildIndex )\NextSibling
+      
+    Wend
+    
+    If FoundChild
+      NodeIndex = ChildIndex
+    Else
+      Break
+    EndIf
+    
+  Wend
+  
+  ProcedureReturn NodeIndex
   
 EndProcedure
 
@@ -3496,11 +3753,37 @@ EndProcedure
 ; value expression used in methods.
 Procedure GenFunctions()
   
+  ;{ Generate dispatch trees for all functions.
+  
+  ForEach GenProgram\FunctionTable\Functions()
+    
+    Define.GenFunction *GenFunction = GenProgram\FunctionTable\Functions()
+    GenDispatchTree( *GenFunction )
+    
+  Next
+  
+  ;}
+  
+  ;{ Generate instructions for all functions.
+  
+  ReDim GenProgram\FunctionTable\CallSites( Code\ExpressionCount )
+  FillMemory( @GenProgram\FunctionTable\CallSites( 0 ), ArraySize( GenProgram\FunctionTable\CallSites() ) * SizeOf( GenCallSite ), 0, #PB_Long )
+  
+  ForEach GenProgram\FunctionTable\Functions()
+    
+    Define.GenFunction *GenFunction = GenProgram\FunctionTable\Functions()
+    
+  Next
+  
+  ;}
+  
+  ;;;;TODO: generate specializations
+  
+  ;{ Emit functions.
+  
   Define.i FunctionCount = MapSize( GenProgram\FunctionTable\Functions() )
   ReDim Program\Functions( FunctionCount )
   Program\FunctionCount = FunctionCount
-  
-  ;{ Generate dispatch trees for all functions.
   
   Define.i FunctionIndex = 0
   ForEach GenProgram\FunctionTable\Functions()
@@ -3510,62 +3793,7 @@ Procedure GenFunctions()
     
     *Function\Name = *GenFunction\Name
     
-    ; Create a dispatch tree for the function.
-    GenDispatchTree( *GenFunction )
-    
-    ; every call side specifies the branch of the dispatch tree at which it wants to enter a function
-    
     FunctionIndex + 1
-    
-  Next
-  
-  ;}
-  
-  ;{ Resolve all call sites.
-  
-  ReDim GenProgram\FunctionTable\CallSites( Code\ExpressionCount )
-  FillMemory( @GenProgram\FunctionTable\CallSites( 0 ), ArraySize( GenProgram\FunctionTable\CallSites() ) * SizeOf( GenCallSite ), 0, #PB_Long )
-  
-  Define.i ExpressionIndex
-  For ExpressionIndex = 0 To Code\ExpressionCount - 1
-    
-    ; Check if it's already resolved.
-    Define.GenCallSite *CallSite = @GenProgram\FunctionTable\CallSites( ExpressionIndex )
-    If *CallSite\Function <> #Null
-      Continue
-    EndIf
-    
-    Define.Expression *Expression = @Code\Expressions( ExpressionIndex )
-    If *Expression\Operator <> #ApplyExpression Or *Expression\Context <> #ValueContext
-      Continue
-    EndIf
-    
-    ; Look up function.
-    Define.Expression *LeftHandExpr = @Code\Expressions( *Expression\FirstOperandI )
-    Select *LeftHandExpr\Operator
-        
-      Case #NameExpression
-        
-        Define.s Name = Code\Identifiers( *LeftHandExpr\FirstOperandI )
-        Define.GenFunction *CalledFunction = FindMapElement( GenProgram\FunctionTable\Functions(), Name )
-        If *CalledFunction = #Null
-          ;;;;TODO: diagnose
-          Debug "Can't find function " + Name
-          Continue
-        Else
-          *CallSite\Function = *CalledFunction
-        EndIf
-        
-      Case #ApplyExpression
-        ;;;;TODO
-        Debug "TODO...."
-        
-      Default
-        Debug "Not implemented... ApplyExpression on expression of type " + ExpressionKindToString( *LeftHandExpr\Operator )
-        
-    EndSelect
-    
-    ; Find dispatch node in dispatch tree.
     
   Next
   
@@ -3642,8 +3870,10 @@ Procedure TranslateProgram( WithLibraries.b )
   GenAssets()
   GenProgram()
   
-  Debug "GenFunctions: " + Str( MapSize( GenProgram\FunctionTable\Functions() ) ) + ", GenTypes: " +
-        Str( GenProgram\TypeTable\TypeCount )
+  Debug "GenFunctions: " + Str( MapSize( GenProgram\FunctionTable\Functions() ) ) +
+        ", GenTypes: " + Str( GenProgram\TypeTable\TypeCount ) +
+        ", GenValues: " + Str( GenProgram\ValueTable\ValueCount ) +
+        ", GenScopes: " + Str( GenProgram\SymbolTable\ScopeCount )
   
 EndProcedure
 
@@ -3941,6 +4171,33 @@ ProcedureUnit CanGenerateDispatchTree()
   Assert( *GenFunction\DispatchTree\Nodes( 2 )\ResultTypeId = GenProgram\TypeTable\NamedTypes( "string" ) )
   Assert( *GenFunction\DispatchTree\Nodes( 2 )\Method = @GenProgram\FunctionTable\Functions( "to_string" )\Methods( 2 ) )
   Assert( *GenFunction\DispatchTree\Nodes( 2 )\Parent = 1 )
+  
+EndProcedureUnit
+  
+ProcedureUnit CanGenerateInstructionsForSimpleFunction()
+  
+  Define.s Text = ~"type Object;\n" +
+                  ~"type A : Object;\n" +
+                  ~"type B : Object;\n" +
+                  ~"object C : Object;\n" +
+                  ~"type String : Object;\n" +
+                  ~"method ToString( Object ) : String return \"Object\"; end;\n" +
+                  ~"method ToString( A ) : String return \"A\"; end;\n" +
+                  ~"method ToString( B | C ) : String return \"B | C\"; end;\n"
+  
+  *Text = UTF8( Text )
+  TextLength = Len( Text )
+  
+  UpdateProgram( #False )
+  
+  Assert( MapSize( GenProgram\FunctionTable\Functions() ) = 1 )
+  Assert( FindMapElement( GenProgram\FunctionTable\Functions(), "to_string" ) <> #Null )
+  
+  Define.GenFunction *GenFunction = GenProgram\FunctionTable\Functions()
+  
+  Assert( *GenFunction\MethodCount = 3 )
+  
+  ;......what does the instruction sequence look like
   
 EndProcedureUnit
 
@@ -4441,8 +4698,9 @@ EndIf
 ;[X] Can generate subtype matrix
 ;[X] Can assign types to methods
 ;[X] Generate dispatch trees
+;[ ] Scopes have symbols tables attached to them (both types and values)
 ;[ ] Can codegen dispatch trees
-;[ ] Can have string literals
+;[X] Can have string literals
 ;[X] Can write apply expressions in dot form
 ;[ ] Can generate a "match argument" sequence for one method
 ;[ ] Can translate a simple if statement followed by a return statement
@@ -4511,8 +4769,7 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 2074
-; FirstLine = 2045
-; Folding = ------------------
-; Markers = 1338,2597,3544,3928
+; CursorPosition = 24
+; Folding = -------------------
+; Markers = 4200
 ; EnableXP
