@@ -762,24 +762,41 @@ EndProcedure
 ;-== Parsing.
 ;;;;TODO: put this on a thread
 
-Structure Parser
+Structure ParserLocationState
   *Position
+  LastRegion.TextRegion
+  CurrentLine.i
+  CurrentColumn.i
+EndStructure
+
+Structure Parser Extends ParserLocationState
   *EndPosition
   *StartPosition
-  LastRegion.TextRegion
+  CurrentScope.i
+  CurrentDefinitionInScope.i
+  CurrentStatement.i
+  CurrentExpressionContext.i
   FileName.s
   NameBufferSize.l
   NameBuffer.s
   StringBufferSize.l
   StringBuffer.s
-  CurrentLine.i
-  CurrentColumn.i
-  CurrentScope.i
-  CurrentDefinitionInScope.i
-  CurrentStatement.i
-  CurrentExpressionContext.i
-  ;store failure state here; func to reset
 EndStructure
+
+Macro SaveParserLocation( Parser, LocationVariable )
+  Define.ParserLocationState LocationVariable
+  LocationVariable\Position = Parser\Position
+  LocationVariable\LastRegion = Parser\LastRegion
+  LocationVariable\CurrentLine = Parser\CurrentLine
+  LocationVariable\CurrentColumn = Parser\CurrentColumn
+EndMacro
+
+Macro RestoreParserLocation( Parser, LocationVariable )
+  Parser\Position = LocationVariable\Position
+  Parser\LastRegion = LocationVariable\LastRegion
+  Parser\CurrentLine = LocationVariable\CurrentLine
+  Parser\CurrentColumn = LocationVariable\CurrentColumn
+EndMacro
 
 Macro PushExpressionContext( Parser, Context )
   Define.i PreviousExpressionContext = Parser\CurrentExpressionContext
@@ -1633,6 +1650,12 @@ Procedure.i ParseParameterList( *Parser.Parser )
       EndIf
     EndIf
     
+    ; Parameters can take two forms: 'A' or 'A : B'. We don't know which it is until we've seen or not
+    ; seen the ':'. We store the current parser location and try to parse 'A : B'. If that works, that's it.
+    ; If we don't see the ':', we back up to where we started and parse just a type expression instead.
+    
+    SaveParserLocation( *Parser, StartLocation )
+    
     Define.i Name = ParseIdentifier( *Parser )
     Define.i TypeExpression = -1
     
@@ -1641,15 +1664,20 @@ Procedure.i ParseParameterList( *Parser.Parser )
     EndIf
     
     SkipWhitespace( *Parser )
-    If MatchToken( *Parser, ":", 1, #True )
-      PushExpressionContext( *Parser, #TypeContext )
-      TypeExpression = ParseExpression( *Parser )
-      If TypeExpression = -1
-        ;;;;TODO: add diagnostic
-        Debug "Expecting type!!"
-      EndIf
-      PopExpressionContext( *Parser )
+    If Not MatchToken( *Parser, ":", 1, #True )
+      ; Back up to where we started. We know that we at least have a name
+      ; expression found at the location.
+      Name = -1
+      RestoreParserLocation( *Parser, StartLocation )
     EndIf
+    
+    PushExpressionContext( *Parser, #TypeContext )
+    TypeExpression = ParseExpression( *Parser )
+    If TypeExpression = -1
+      ;;;;TODO: add diagnostic
+      Debug "Expecting type!!"
+    EndIf
+    PopExpressionContext( *Parser )
     
     Define.i ParameterIndex = Code\ParameterCount
     If ArraySize( Code\Parameters() ) = ParameterIndex
@@ -2320,7 +2348,7 @@ ProcedureUnit CanParseMethodDefinitionWithValueParameters()
   Assert( Code\ScopeCount = 2 )
   Assert( Code\StatementCount = 0 )
   Assert( Code\ParameterCount = 2 )
-  Assert( Code\ExpressionCount = 1 )
+  Assert( Code\ExpressionCount = 2 )
   Assert( Code\Identifiers( 0 ) = "first" )
   Assert( Code\Identifiers( 1 ) = "a" )
   Assert( Code\Identifiers( 2 ) = "b" )
@@ -2334,15 +2362,56 @@ ProcedureUnit CanParseMethodDefinitionWithValueParameters()
   Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
   Assert( Code\Scopes( 1 )\Definition = 0 )
   Assert( Code\Scopes( 1 )\FirstDefinitionOrStatement = -1 )
-  Assert( Code\Parameters( 0 )\Name = 1 )
+  Assert( Code\Parameters( 0 )\Name = -1 )
   Assert( Code\Parameters( 0 )\NextParameter = 1 )
-  Assert( Code\Parameters( 0 )\TypeExpression = -1 )
+  Assert( Code\Parameters( 0 )\TypeExpression = 0 )
   Assert( Code\Parameters( 1 )\Name = 2 )
   Assert( Code\Parameters( 1 )\NextParameter = -1 )
-  Assert( Code\Parameters( 1 )\TypeExpression = 0 )
+  Assert( Code\Parameters( 1 )\TypeExpression = 1 )
   Assert( Code\Expressions( 0 )\Operator = #NameExpression )
-  Assert( Code\Expressions( 0 )\FirstOperandI = 3 )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 1 )
   Assert( Code\Expressions( 0 )\Context = #TypeContext )
+  Assert( Code\Expressions( 1 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 3 )
+  Assert( Code\Expressions( 1 )\Context = #TypeContext )
+EndProcedureUnit
+
+; A parameter can drop the *name*. I.e. instead of "A : B", you write "B".
+; This does *NOT* drop the type part, it drops the name part.
+; So "B" is equivalent to "B : B", i.e. it generates an implicit name.
+; The interesting thing is that it can be a full type expression, not just a simple named type.
+; So, "A | B" is just as valid as "A< B >", for example.
+; "A | B" gets a name "a_or_b".
+; "A & B" gets a name "a_and_b".
+ProcedureUnit CanParseMethodDefinitionUsingImplicitlyNamedParameter()
+  ResetCode()
+  TestParseText( @ParseDefinition(), "method First( A | B ) end;", 0 )
+  Assert( Code\DefinitionCount = 1 )
+  Assert( Code\IdentifierCount = 3 )
+  Assert( Code\ExpressionCount = 3 )
+  Assert( Code\ParameterCount = 1 )
+  Assert( Code\Identifiers( 0 ) = "first" )
+  Assert( Code\Identifiers( 1 ) = "a" )
+  Assert( Code\Identifiers( 2 ) = "b" )
+  Assert( Code\Definitions( 0 )\Name = 0 )
+  Assert( Code\Definitions( 0 )\DefinitionKind = #MethodDefinition )
+  Assert( Code\Definitions( 0 )\Flags = 0 )
+  Assert( Code\Definitions( 0 )\FirstAnnotation = -1 )
+  Assert( Code\Definitions( 0 )\FirstValueParameter = 0 )
+  Assert( Code\Definitions( 0 )\FirstTypeParameter = -1 )
+  Assert( Code\Parameters( 0 )\Name = -1 ) ; No name!
+  Assert( Code\Parameters( 0 )\NextParameter = -1 )
+  Assert( Code\Parameters( 0 )\TypeExpression = 2 )
+  Assert( Code\Expressions( 0 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 0 )\FirstOperandI = 1 )
+  Assert( Code\Expressions( 0 )\Context = #TypeContext )
+  Assert( Code\Expressions( 1 )\Operator = #NameExpression )
+  Assert( Code\Expressions( 1 )\FirstOperandI = 2 )
+  Assert( Code\Expressions( 1 )\Context = #TypeContext )
+  Assert( Code\Expressions( 2 )\Operator = #OrExpression )
+  Assert( Code\Expressions( 2 )\FirstOperandI = 0 )
+  Assert( Code\Expressions( 2 )\SecondOperandI = 1 )
+  Assert( Code\Expressions( 2 )\Context = #TypeContext )
 EndProcedureUnit
 
 ProcedureUnit CanParseTypeDefinitionWithAnnotation()
@@ -2488,7 +2557,7 @@ Enumeration Intrinsic
   #IntrFloatSubtract
   #IntrFloatMultiply
   #IntrFloatDivide
-  #intrFloatModulo
+  #IntrFloatModulo
   
 EndEnumeration
 
@@ -4192,6 +4261,10 @@ ProcedureUnit CanGenerateInstructionsForSimpleFunction()
   
   Assert( MapSize( GenProgram\FunctionTable\Functions() ) = 1 )
   Assert( FindMapElement( GenProgram\FunctionTable\Functions(), "to_string" ) <> #Null )
+  Assert( MapSize( Code\StringLiterals() ) = 3 )
+  Assert( FindMapElement( Code\StringLiterals(), "Object" ) <> #Null )
+  Assert( FindMapElement( Code\StringLiterals(), "A" ) <> #Null )
+  Assert( FindMapElement( Code\StringLiterals(), "B | C" ) <> #Null )
   
   Define.GenFunction *GenFunction = GenProgram\FunctionTable\Functions()
   
@@ -4698,7 +4771,7 @@ EndIf
 ;[X] Can generate subtype matrix
 ;[X] Can assign types to methods
 ;[X] Generate dispatch trees
-;[ ] Scopes have symbols tables attached to them (both types and values)
+;[ ] Scopes have symbols tables attached to them (both types and values) <----------
 ;[ ] Can codegen dispatch trees
 ;[X] Can have string literals
 ;[X] Can write apply expressions in dot form
@@ -4721,6 +4794,7 @@ EndIf
 
 ;[X] Can have type aliases
 ;[ ] Can have method aliases
+;[X] Can have implicitly named parameters
 ;[ ] Can write parameterized types
 ;[ ] Can instantiate parameterized types
 ;[ ] Can write parameterized methods
@@ -4771,5 +4845,5 @@ EndIf
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
 ; CursorPosition = 24
 ; Folding = -------------------
-; Markers = 4200
+; Markers = 1657,4273
 ; EnableXP
