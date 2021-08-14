@@ -2744,20 +2744,17 @@ Structure GenFunctionTable
   Map Functions.GenFunction()
 EndStructure
 
-;;;;REVIEW: Should this use a trie-approach that also works for auto-completion?
-
 ; A symbol table entry.
-; Each entry is a node in a balanced binary tree.
-; Nodes within the same scope can be mutated.
-; Nodes "inherited" from parent scopes cannot be mutated and thus need to be duplicated.
-Structure GenScopeEntry
+Structure GenSymbol
   IdentifierIndex.l
-  ScopeIndex.l
+  ScopeIndex.l        ; The scope that *owns* the node, not necessarily the scope the symbol was defined in.
   ValueIndex.l        ; Index into GenValueTable\Values(). -1 if no value entry.
   TypeIndex.l         ; Index into GenTypeTable\Types(). -1 if no type entry.
-  LeftChildIndex.l
-  RightChildIndex.l
+  NextSymbol.l
 EndStructure
+
+; For now, hash-table size for scopes is fixed.
+#GENSCOPE_HASHTABLE_SIZE = 16
 
 ; 
 Structure GenScope
@@ -2765,13 +2762,14 @@ Structure GenScope
   ParentScope.l                 ; -1 for root.
   FirstChildScope.l
   NextSiblingScope.l
-  RootEntry.l
+  SymbolTable.l[ #GENSCOPE_HASHTABLE_SIZE ]
 EndStructure
 
 Structure GenSymbolTable
-  ScopeCount.i
+  ScopeCount.l
+  SymbolCount.l
   Array Scopes.GenScope( 0 ) ; First scope is global scope.
-  Array Entries.GenScopeEntry( 0 )
+  Array Symbols.GenSymbol( 0 )
 EndStructure
 
 Structure GenValue
@@ -2959,7 +2957,7 @@ EndProcedure
 
 Procedure.i NewGenScope( ParentScopeIndex.i )
   
-  Define ScopeIndex = GenProgram\SymbolTable\ScopeCount
+  Define.i ScopeIndex = GenProgram\SymbolTable\ScopeCount
   If ArraySize( GenProgram\SymbolTable\Scopes() ) = ScopeIndex
     ReDim GenProgram\SymbolTable\Scopes( ScopeIndex + 512 )
   EndIf
@@ -2968,7 +2966,35 @@ Procedure.i NewGenScope( ParentScopeIndex.i )
   Define.GenScope *GenScope = @GenProgram\SymbolTable\Scopes( ScopeIndex )
   *GenScope\ParentScope = ParentScopeIndex
   
+  Define.i HashTableIndex
+  For HashTableIndex = 0 To #GENSCOPE_HASHTABLE_SIZE - 1
+    *GenScope\SymbolTable[ HashTableIndex ] = -1
+  Next
+    
   ProcedureReturn ScopeIndex
+  
+EndProcedure
+
+Procedure.i NewGenSymbol( ScopeIndex.i, IdentifierIndex.i )
+  
+  Define.i SymbolIndex = GenProgram\SymbolTable\SymbolCount
+  If ArraySize( GenProgram\SymbolTable\Symbols() ) = SymbolIndex
+    ReDim GenProgram\SymbolTable\Symbols( SymbolIndex + 2048 )
+  EndIf
+  GenProgram\SymbolTable\SymbolCount + 1
+  
+  Define.GenSymbol *Symbol = @GenProgram\SymbolTable\Symbols( SymbolIndex )
+  *Symbol\IdentifierIndex = IdentifierIndex
+  *Symbol\ScopeIndex = ScopeIndex
+    
+  Define.GenScope *Scope = GenProgram\SymbolTable\Scopes( ScopeIndex )
+  
+  Define.i HashTableIndex = IdentifierIndex % #GENSCOPE_HASHTABLE_SIZE
+  
+  *Symbol\NextSymbol = *Scope\SymbolTable[ HashTableIndex ]
+  *Scope\SymbolTable[ HashTableIndex ] = SymbolIndex
+  
+  ProcedureReturn SymbolIndex
   
 EndProcedure
 
@@ -3054,6 +3080,33 @@ Procedure.i MakeCombinedGenType( CombinedTypeKind.i, LeftTypeId.i, RightTypeId.i
   
   ProcedureReturn *GenType
           
+EndProcedure
+
+Procedure.i LookupSymbol( ScopeIndex.i, IdentifierIndex.i )
+  
+  Define.i HashTableIndex = IdentifierIndex % #GENSCOPE_HASHTABLE_SIZE
+  
+  Define.i CurrentScope = ScopeIndex
+  While CurrentScope <> -1
+    
+    Define.i CurrentSymbol = GenProgram\SymbolTable\Scopes( CurrentScope )\SymbolTable[ HashTableIndex ]
+    While CurrentSymbol <> -1
+      
+      Define.GenSymbol *Symbol = @GenProgram\SymbolTable\Symbols( CurrentSymbol )
+      If *Symbol\IdentifierIndex = IdentifierIndex
+        ProcedureReturn CurrentSymbol
+      EndIf
+      
+      CurrentSymbol = *Symbol\NextSymbol
+      
+    Wend
+    
+    CurrentScope = GenProgram\SymbolTable\Scopes( CurrentScope )\ParentScope
+    
+  Wend
+  
+  ProcedureReturn -1
+  
 EndProcedure
 
 ; Assinging types is recursive.
@@ -3942,7 +3995,8 @@ Procedure TranslateProgram( WithLibraries.b )
   Debug "GenFunctions: " + Str( MapSize( GenProgram\FunctionTable\Functions() ) ) +
         ", GenTypes: " + Str( GenProgram\TypeTable\TypeCount ) +
         ", GenValues: " + Str( GenProgram\ValueTable\ValueCount ) +
-        ", GenScopes: " + Str( GenProgram\SymbolTable\ScopeCount )
+        ", GenScopes: " + Str( GenProgram\SymbolTable\ScopeCount ) +
+        ", GenSymbols: " + Str( GenProgram\SymbolTable\SymbolCount )
   
 EndProcedure
 
@@ -4290,6 +4344,37 @@ ProcedureUnit CanDetectCallToMissingFunction()
   
 EndProcedureUnit
 CompilerEndIf
+
+ProcedureUnit CanCreatedNestedSymbolScopes()
+
+  ResetStructure( @GenProgram, GenProgram )
+
+  Define OuterScope = NewGenScope( -1 )
+  
+  Define FirstSymbol = NewGenSymbol( OuterScope, 0 )
+  Define SecondSymbol = NewGenSymbol( OuterScope, 1 )
+  
+  Define InnerScope = NewGenScope( OuterScope )
+  
+  Define ThirdSymbol = NewGenSymbol( InnerScope, 2 )
+  Define FourthSymbol = NewGenSymbol( OuterScope, 3 ) ; Add one to outer scope after inner scope already exists.
+  
+  Assert( GenProgram\SymbolTable\ScopeCount = 2 )
+  Assert( GenProgram\SymbolTable\SymbolCount = 4 )
+  
+  Assert( LookupSymbol( InnerScope, 4 ) = -1 )
+  Assert( LookupSymbol( InnerScope, 3 ) = FourthSymbol )
+  Assert( LookupSymbol( InnerScope, 2 ) = ThirdSymbol )
+  Assert( LookupSymbol( InnerScope, 1 ) = SecondSymbol )
+  Assert( LookupSymbol( InnerScope, 0 ) = FirstSymbol )
+
+  Assert( LookupSymbol( OuterScope, 4 ) = -1 )
+  Assert( LookupSymbol( OuterScope, 3 ) = FourthSymbol )
+  Assert( LookupSymbol( OuterScope, 2 ) = -1 )
+  Assert( LookupSymbol( OuterScope, 1 ) = SecondSymbol )
+  Assert( LookupSymbol( OuterScope, 0 ) = FirstSymbol )
+  
+EndProcedureUnit
 
 ;}
 
@@ -4771,7 +4856,7 @@ EndIf
 ;[X] Can generate subtype matrix
 ;[X] Can assign types to methods
 ;[X] Generate dispatch trees
-;[ ] Scopes have symbols tables attached to them (both types and values) <----------
+;[X] Scopes have symbols tables attached to them (both types and values)
 ;[ ] Can codegen dispatch trees
 ;[X] Can have string literals
 ;[X] Can write apply expressions in dot form
@@ -4843,7 +4928,8 @@ EndIf
 ; - How would scenes be created in a graphical way?
 ; - Where do we display log and debug output?
 ; IDE Options = PureBasic 5.73 LTS (Windows - x64)
-; CursorPosition = 24
-; Folding = -------------------
-; Markers = 1657,4273
+; CursorPosition = 4858
+; FirstLine = 4842
+; Folding = --------------------
+; Markers = 2768,2999,4352
 ; EnableXP
