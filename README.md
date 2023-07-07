@@ -8,5 +8,7 @@ Has some interesting stuff like live-generating docs from the code and running a
 
 The "BASIC" variant is really just a BASIC-ized version of [Flux](https://github.com/Rene-Damm/flux-ml).
 
+That bottom right quadrant in the IDE is meant to show a live view from the standalone Unity player that the C# code running in the Unity editor would continuously update. The project didn't get that far.
+
 ![Screenshot](./Screenshot.png)
 
