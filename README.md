@@ -4,3 +4,5 @@ A fun hack project to write a Basic IDE that (hot) compiles to a Unity project. 
 
 Written in [PureBasic](https://www.purebasic.com).
 
+![Screenshot](./Screenshot.png)
+
