@@ -2,9 +2,9 @@
 
 |PRODUCT MyProduct
 |COMPANY MyCompany
-|PRAGMA NamingConvention( Pascal )
-|PRAGMA Indentation( 4, Spaces )
-|PRAGMA Debug( writecode )
+|NAMING Pascal
+|INDENTATION 4 Spaces
+|BUILDOPTION writecode
 PROGRAM FirstProgram;
 
 |CATEGORY MyShit

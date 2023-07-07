@@ -7,12 +7,76 @@
   <section name="data">
     <explorer view="..\AeonFlux_PureBasic\" pattern="0"/>
     <log show="1"/>
-    <lastopen date="2021-08-14 21:01" user="Rene Damm" host="VORKRAFT"/>
+    <lastopen date="2023-07-08 01:00" user="Rene Damm" host="VORKRAFT"/>
   </section>
   <section name="files">
+    <file name="Analyze.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="1239a09e1474c76f08aae516b929a96d"/>
+    </file>
+    <file name="Code.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="46af48096bfca95a3656d6c2001faebf"/>
+    </file>
+    <file name="Compile.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="719724276a8dfe96ed2957dfc1bddf65"/>
+    </file>
+    <file name="Docs.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="d834045a7bcff8d6507635e80db82ddd"/>
+    </file>
+    <file name="Generate.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="c9071dec95cd6789915f6ec51e36f585"/>
+    </file>
+    <file name="Host.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="390081b7b2a21d79cbd02ab60503eabe"/>
+    </file>
+    <file name="HTTP.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="fd3b030c72cc3556e6d3db053791267d"/>
+    </file>
+    <file name="Machine.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="813c4fd3d72f6f97c08beb6a65367b79"/>
+    </file>
+    <file name="Network.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="daa7770af1b0281cfb2677abb283072e"/>
+    </file>
+    <file name="Parse.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="5032152648a59cfaa3e656dc8ba48709"/>
+    </file>
+    <file name="Program.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="75083e85c787c91c1b21ad77a5427b18"/>
+    </file>
+    <file name="Text.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="f2f25e9d59e14132d58010ee82a8765b"/>
+    </file>
+    <file name="Translate.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="6643148c7912db04cea1cc10cf9318d9"/>
+    </file>
+    <file name="Unity.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="2fe93011d17fba3dc55659ee5909bda2"/>
+    </file>
     <file name="UnityBasic.pb">
       <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
-      <fingerprint md5="f7555c33689dc866de7405c7d25a20ce"/>
+      <fingerprint md5="406add744a43b259a36a8989839bccfa"/>
+    </file>
+    <file name="Utils.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="8d93d3a67e1c263ea34825ce143e035f"/>
+    </file>
+    <file name="Web.pb">
+      <config load="0" scan="1" panel="1" warn="1" lastopen="1" panelstate="+"/>
+      <fingerprint md5="bfa25db9ae794d7a53e346425b7819eb"/>
     </file>
   </section>
   <section name="targets">
